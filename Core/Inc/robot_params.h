@@ -43,7 +43,7 @@
  * - Đảm bảo CurSpeed CÙNG DẤU với SpeedPIDOut và DesiredSpeed (Phản hồi âm ổn định):
  */
 #define MOTOR_LEFT_DIRECTION      (+1)    /* Đã đảo lại +1 để CurSpeed2 cùng dấu với SpeedPIDOut2/DesiredSpeed2 */
-#define MOTOR_RIGHT_DIRECTION     (-1)    /* Đã đảo lại -1 để CurSpeed1 cùng dấu với SpeedPIDOut1/DesiredSpeed1 */
+#define MOTOR_RIGHT_DIRECTION     (-1)    /* Motor Phai: (-1) vi chuoi pha Hall quay tien cho step=-1, nhan voi (-1) se dem DUONG (+) va CurSpeed1 DUONG (+) */
 
 /**
  * Số cạnh chuyển trạng thái Hall trên 1 vòng quay bánh xe:
@@ -63,7 +63,7 @@
  * ==================================================================== */
 #define WHEEL_DIAMETER_M   0.1651f     // Đường kính bánh xe (10 cm)
 #define WHEEL_CIRC_M       (3.1415926f * WHEEL_DIAMETER_M)
-#define WHEEL_BASE_M       0.292f    // Khoảng cách 2 bánh xe (m)
+#define WHEEL_BASE_M       0.551f    // Khoảng cách 2 bánh xe (m)
 
 // Chu kỳ lấy mẫu cho các task (ms)
 #define ODOMETRY_PERIOD_MS     5
@@ -72,38 +72,48 @@
 #define UART_PERIOD_MS         50
 #define DT_TIME                0.005f
 
-// Giới hạn tốc độ và gia tốc
-#define MAXSPEED           1.00f
-#define V_MAX              1.00f     // Tốc độ dài cực đại (m/s)
-#define V_STEP             0.50f     // Bước tốc độ D-pad
+// Giới hạn tốc độ và gia tốc (Tối ưu cho robot cao 1.6m, nặng 50kg, 2 bánh 6.5" + 4 bánh đa hướng)
+#define MAXSPEED           0.08f     // Vận tốc trần 0.08 m/s cho chuyển động siêu êm
+#define V_MAX              0.08f     // Tốc độ dài cực đại (m/s)
+#define V_STEP             0.02f     // Bước tốc độ D-pad (m/s)
 
-// Hệ số bù trước Feedforward vận tốc: cung cấp công suất nền cơ bản (PWM / (m/s))
-// 250.0f cho ~125 PWM tại 0.5 m/s, êm dịu, không gây vọt lố hay sập nguồn
-#define MOTOR_FEEDFORWARD_KV   250.0f
+// Mức bù công suất ma sát tĩnh cơ bản (Stiction Offset PWM) cho tải nặng 50kg:
+// Được tăng dốc mềm mại (Ramped Stiction Feedforward) theo DesiredSpeed từ 0 -> 125 PWM trong 110ms,
+// cung cấp đầy đủ lực kéo mạnh mẽ để Bánh 1 & 2 cùng thắng ma sát nghỉ mà không gây giật đề-ba.
+#define MOTOR_MIN_PWM          125.0f
+
+// Hệ số bù trước Feedforward vận tốc động (Dynamic Feedforward)
+#define MOTOR_FEEDFORWARD_KV   350.0f
 
 #define MAXACC             2.5f
 
-// Hằng số bộ điều khiển PS2
-#define W_MAX              2.00f     // Tốc độ góc cực đại (rad/s)
-#define W_STEP             0.50f     // Bước tốc độ xoay D-pad
+// Hằng số bộ điều khiển PS2 (Tốc độ góc giới hạn ~14.3 độ/s để robot cao 1.6m quay mượt, an toàn)
+#define W_MAX              0.25f     // Tốc độ góc cực đại (rad/s) (~14.3 độ/giây)
+#define W_STEP             0.08f     // Bước tốc độ xoay D-pad (~4.6 độ/giây)
 
 #define PS2_TIMEOUT_MS     500
 #define STICK_DEADBAND     12        // Vùng chết cần analog (0..255)
 
-// Ngưỡng kích hoạt Heading hold
-#define EPS_TURN_MPS       0.03f   // if |vR_ref - vL_ref| < this => "straight command"
-#define EPS_MOVE_MPS       0.05f   // if avg speed below this => don't bother holding heading
+// Ngưỡng kích hoạt đi thẳng / quay đầu
+#define EPS_TURN_MPS       0.015f   // Nếu |vR_ref - vL_ref| < this => lệnh đi thẳng (m/s)
+#define EPS_MOVE_MPS       0.015f   // Ngưỡng tốc độ để kích hoạt vòng đồng bộ (phù hợp cả với bước D-pad 0.02 m/s)
 
-// Hệ số bộ điều khiển hướng (Heading controller gains)
+// Thông số Vòng tham chiếu đồng bộ 2 bánh xe (Dual-Wheel Cross-Coupling Reference Loop)
+#define SYNC_KP            0.80f    // Hệ số bù sai số quãng đường dịu dàng, nắn thẳng từ từ
+#define SYNC_KD            0.02f    // Hệ số bù sai số vận tốc tức thời
+#define V_SYNC_CORR_MAX    0.015f   // Giới hạn vận tốc bù đồng bộ cực đại (m/s)
+
+// Hệ số bộ điều khiển hướng cũ (giữ tương thích)
 #define HEADING_KP         2.0f
 #define HEADING_KD         0.1f
-
-// Chu kỳ vòng lặp hướng
 #define HEADING_DT         0.02f   // 20 ms (50 Hz)
 #define HEADING_DIV        4       // 4 ticks * 5ms = 20ms
-
-// Giới hạn hiệu chỉnh góc (rad/s)
 #define OMEGA_CORR_MAX     2.0f
+
+// Biến trạng thái Vòng tham chiếu đồng bộ (Live Debug)
+extern volatile float g_sync_e_pos;
+extern volatile float g_sync_v_corr;
+extern volatile uint8_t g_sync_active;
 
 // Biến điều khiển PID
 extern PID_TypeDef PosPID1, PosPID2;

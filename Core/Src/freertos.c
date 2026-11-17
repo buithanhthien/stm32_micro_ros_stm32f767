@@ -162,13 +162,8 @@ volatile double SetPos2 = 0.0f;
 volatile double SetSpeed1 = 0.0f;
 volatile double SetSpeed2 = 0.0f;
 
-//these variables are used to correct the heading
+// Yaw angle tích lũy dùng cho Odometry
 static float g_theta = 0.0f;
-static float g_theta_ref = 0.0f;
-static float g_e_theta_prev = 0.0f;
-static uint8_t g_heading_hold_en = 0;
-static uint32_t g_heading_div_ctr = 0;
-//////////////////////////////////////////////////
 
 //static volatile uint8_t pid_update_pending = 0;  //biến dùng để update PID từ ROS
 static SemaphoreHandle_t pid_mutex;  //kỹ thuật cho phép tạm thời lock trong quá trình thay đổi biến PID, tránh bị cập nhật nửa chừng
@@ -265,12 +260,14 @@ static inline uint32_t ms_now(void) { return (uint32_t)(xTaskGetTickCount() * po
 
 void apply_stiction_kick(float *vL_cmd, float *vR_cmd, float vL_meas, float vR_meas)
 {
+    (void)vL_meas;
+    (void)vR_meas;
     const float CMD_EPS   = 0.02f;   // command considered "wants to move"
     const float MEAS_EPS  = 0.01f;   // measured considered "still not moving"
     const uint32_t STUCK_TIME_MS = 200;
 
-    const float KICK_ADD  = 0.03f;   // m/s extra push
-    const float KICK_MAX  = 0.20f;   // m/s cap for kick effect
+    const float KICK_ADD  = 0.0f;    // Đã vô hiệu hóa kick đột ngột để loại bỏ hoàn toàn cú giật đề-ba
+    const float KICK_MAX  = 0.0f;    // Ramping tuyến tính + Kv=900 đảm bảo xe xuất phát siêu êm
 
     float v_avg_cmd  = 0.5f * (*vL_cmd + *vR_cmd);
     float v_avg_meas = 0.5f * (vL_meas + vR_meas);
@@ -1342,58 +1339,84 @@ void MotorControlTask(void *argument)
 				float v_avg_cmd = 0.5f * (vL_ref_cmd + vR_ref_cmd);
 				float dv_cmd    = (vR_ref_cmd - vL_ref_cmd);
 
-				// Chỉ kích hoạt Heading Hold trong chế độ tự hành autonomous_MODE (tránh can thiệp làm lệch 2 bánh khi lái tay bằng PS2)
-				uint8_t want_heading_hold =
-				    (autonomous_MODE != 0) &&
-				    (fabsf(dv_cmd) < EPS_TURN_MPS) &&
-				    (fabsf(v_avg_cmd) > EPS_MOVE_MPS);
+				// =================================================================
+				// VONG THAM CHIEU DONG BO 2 BANH XE (Dual-Wheel Cross-Coupling Reference Loop)
+				// =================================================================
+				// Khac phuc triet de hien tuong truot banh hoac mat bam khi di thang.
+				// Ap dung cho CA 2 CHE DO: Tu hanh ROS va Lai tay PS2.
+				// Kich hoat khi da qua giai doan de-ba (fabsf(v_avg_cmd) >= EPS_MOVE_MPS) de khong lam lech huong ban dau.
+				static uint8_t s_sync_active = 0;
+				static double s_pos1_start = 0.0;
+				static double s_pos2_start = 0.0;
 
-				//Then detect rising edge to latch heading reference:
-				if (want_heading_hold && !g_heading_hold_en) {
-				    g_theta_ref = g_theta;        // latch current heading
-				    g_e_theta_prev = 0.0f;
+				uint8_t want_sync = (fabsf(dv_cmd) < EPS_TURN_MPS) && (fabsf(v_avg_cmd) >= EPS_MOVE_MPS);
+
+				// Phat hien canh len cua trang thai di thang: chot vi tri moc 2 banh
+				if (want_sync && !s_sync_active) {
+					taskENTER_CRITICAL();
+					s_pos1_start = CurPos1;
+					s_pos2_start = CurPos2;
+					taskEXIT_CRITICAL();
+					s_sync_active = 1;
+				} else if (!want_sync) {
+					s_sync_active = 0;
 				}
 
-				g_heading_hold_en = want_heading_hold;
+				float v_sync_corr = 0.0f;
+				if (s_sync_active) {
+					taskENTER_CRITICAL();
+					double cur_p1 = CurPos1;
+					double cur_p2 = CurPos2;
+					double cur_v1 = CurSpeed1;
+					double cur_v2 = CurSpeed2;
+					taskEXIT_CRITICAL();
 
-				//Heading PD outer loop (run every 20 ms), then modify DesiredSpeed1/2
-				float omega_corr = 0.0f;
+					float dir_sgn = (v_avg_cmd >= 0.0f) ? 1.0f : -1.0f;
 
-				if (g_heading_hold_en) {
+					// Quang duong moi banh di duoc tu moc bat dau di thang (theo chieu chuyen dong):
+					double delta_s1 = (cur_p1 - s_pos1_start) * (double)dir_sgn;  // Banh phai (Motor 1)
+					double delta_s2 = (cur_p2 - s_pos2_start) * (double)dir_sgn;  // Banh trai (Motor 2)
 
-				    // Run heading controller at slower rate
-				    g_heading_div_ctr++;
-				    if (g_heading_div_ctr >= HEADING_DIV) {
-				        g_heading_div_ctr = 0;
+					// Sai so quang duong va van toc tuc thoi theo chieu chuyen dong:
+					float e_sync = (float)(delta_s1 - delta_s2);
+					float e_v    = (float)((cur_v1 - cur_v2) * (double)dir_sgn);
 
-				        float e_theta = wrap_pi(g_theta_ref - g_theta);
-				        float de      = (e_theta - g_e_theta_prev) / HEADING_DT;
+					// Vung chet 1 xung Hall (~5.76mm) de tranh giat lac do luong tu hoa:
+					float e_sync_eff = e_sync;
+					if (fabsf(e_sync_eff) < 0.006f) {
+						e_sync_eff = 0.0f;
+					}
 
-				        omega_corr = HEADING_KP * e_theta + HEADING_KD * de;
-				        omega_corr = clampf(omega_corr, -OMEGA_CORR_MAX, OMEGA_CORR_MAX);
+					// Tinh luong bu van toc sua doi (PD Reference Loop):
+					v_sync_corr = (SYNC_KP * e_sync_eff) + (SYNC_KD * e_v);
 
-				        g_e_theta_prev = e_theta;
+					// Dynamic Clamping: Gioi han luong bu toi da 20% van toc hien tai
+					// Dam bao luong bu luon nho hon rat nhieu so voi lenh tien, khong the gay xoay xe:
+					float max_corr = 0.20f * fabsf(v_avg_cmd);
+					if (max_corr > V_SYNC_CORR_MAX) max_corr = V_SYNC_CORR_MAX;
+					if (max_corr < 0.002f) max_corr = 0.002f;
+					v_sync_corr = clampf(v_sync_corr, -max_corr, max_corr);
 
-				        // Convert omega correction -> wheel linear speed offsets
-				        // vR = v + omega*L/2 ; vL = v - omega*L/2
-				        float v_corr = omega_corr * (WHEEL_BASE_M * 0.5f);
+					// Cap nhat bien giam sat Live Debug
+					g_sync_e_pos  = e_sync;
+					g_sync_v_corr = v_sync_corr;
+					g_sync_active = 1;
 
-				        // Keep same average command, just bias left/right
-				        float v_avg = v_avg_cmd;
-
-				        vR_ref_cmd = v_avg + v_corr;
-				        vL_ref_cmd = v_avg - v_corr;
-				    }
-				    // else: keep last computed vL_ref_cmd/vR_ref_cmd from previous heading tick
+					// Dieu chinh lenh toc do truoc khi vao Ramping:
+					// Banh phai di nhanh hon -> giam vR, tang vL de nhe nhang giu xe thang tap
+					vR_ref_cmd -= dir_sgn * v_sync_corr;
+					vL_ref_cmd += dir_sgn * v_sync_corr;
 				} else {
-				    g_heading_div_ctr = 0;
+					g_sync_active = 0;
+					g_sync_v_corr = 0.0f;
+					g_sync_e_pos  = 0.0f;
 				}
 
 				//Here apply kick start if needed
 				float vL_cmd = vL_ref_cmd;
 				float vR_cmd = vR_ref_cmd;
 
-				// Đọc phản hồi vận tốc nguyên tử từ CurSpeed
+				// Doc phan hoi van toc nguyen tu tu CurSpeed
 				taskENTER_CRITICAL();
 				float vL_meas = (float)CurSpeed2;
 				float vR_meas = (float)CurSpeed1;
@@ -1402,17 +1425,17 @@ void MotorControlTask(void *argument)
 				apply_stiction_kick(&vL_cmd, &vR_cmd, vL_meas, vR_meas);
 
 				// ==========================================
-				// ÁP DỤNG VELOCITY RAMPING (Làm mượt gia tốc & giảm tốc)
+				// AP DUNG VELOCITY RAMPING (Lam muot gia toc & giam toc)
 				// ==========================================
 				Apply_Robot_Ramping(&smoothed_speed1, (double)vR_cmd);
 				Apply_Robot_Ramping(&smoothed_speed2, (double)vL_cmd);
 
 				// ==========================================
-				// DỪNG ĐỘNG CƠ ÊM ÁI KHI BUÔNG CẦN
+				// DUNG DONG CO EM AI KHI BUONG CAN (Nguong 0.002 m/s cho robot 1.6m)
 				// ==========================================
-				if (fabs(teleop_v_r) < 0.01f && fabs(teleop_v_l) < 0.01f &&
-				    fabs(smoothed_speed1) < 0.01 && fabs(smoothed_speed2) < 0.01) {
-					// Đã dừng hẳn: reset tích phân PID và khóa công suất về 0
+				if (fabs(teleop_v_r) < 0.002f && fabs(teleop_v_l) < 0.002f &&
+				    fabs(smoothed_speed1) < 0.002 && fabs(smoothed_speed2) < 0.002) {
+					// Da dung han: reset tich phan PID va khoa cong suat ve 0
 					smoothed_speed1 = 0.0;
 					smoothed_speed2 = 0.0;
 					DesiredSpeed1 = 0.0;
@@ -1450,33 +1473,54 @@ void MotorControlTask(void *argument)
 
 					MotorData_Publish(SpeedPIDOut1, SpeedPIDOut2);  //update PWM data for LCD display
 
-					// 1. Bù trước Feedforward vận tốc: cấp sẵn công suất nền theo vận tốc mong muốn
-					// Giúp bánh xe đạt ngay tốc độ mong muốn mà không cần đẩy Kp quá cao gây khực
-					float ff1 = (float)(DesiredSpeed1 * MOTOR_FEEDFORWARD_KV);
-					float ff2 = (float)(DesiredSpeed2 * MOTOR_FEEDFORWARD_KV);
+					// 1. Bu truoc Feedforward van toc ket hop Ramped Stiction Compensation:
+					// Tang doc tuyen tinh lien tuc tu 0 -> MOTOR_MIN_PWM (125 PWM) trong dai [0 .. 0.02 m/s].
+					// Giup triet tieu hoan toan cu giat buoc nhay dien ap khi de-ba,
+					// dong thoi cung cap du 100% luc keo manh me de Banh 1 va Banh 2 cung thang ma sat 50kg.
+					float ff1 = 0.0f;
+					float ff2 = 0.0f;
+
+					float abs_v1 = fabsf((float)DesiredSpeed1);
+					if (abs_v1 > 0.001f) {
+						float r1 = abs_v1 / 0.02f;
+						if (r1 > 1.0f) r1 = 1.0f;
+						float ff_base1 = r1 * MOTOR_MIN_PWM;
+						float ff_dyn1  = abs_v1 * MOTOR_FEEDFORWARD_KV;
+						ff1 = copysignf(ff_base1 + ff_dyn1, (float)DesiredSpeed1);
+					}
+
+					float abs_v2 = fabsf((float)DesiredSpeed2);
+					if (abs_v2 > 0.001f) {
+						float r2 = abs_v2 / 0.02f;
+						if (r2 > 1.0f) r2 = 1.0f;
+						float ff_base2 = r2 * MOTOR_MIN_PWM;
+						float ff_dyn2  = abs_v2 * MOTOR_FEEDFORWARD_KV;
+						ff2 = copysignf(ff_base2 + ff_dyn2, (float)DesiredSpeed2);
+					}
 
 					float total1 = ff1 + (float)SpeedPIDOut1;
 					float total2 = ff2 + (float)SpeedPIDOut2;
 
-					// 2. Khóa chiều xuất PWM theo chiều mong muốn (DesiredSpeed)
-					// Tránh việc gai xung tốc độ làm PID âm tức thời gây lật chân DIR liên tục dẫn đến giật khựng
+					// 2. Khoa chieu PWM theo DesiredSpeed de triet tieu hoan toan hien tuong lat DIR gay 'cach cach':
+					// Ramping da lam muot DesiredSpeed khi chuyen doi tien <-> lui.
+					// Khoa chieu dam bao khi dang chay mot chieu, gai nhieu PID khong lam doi chan DIR.
 					int16_t cmd_motor1 = 0;
 					int16_t cmd_motor2 = 0;
 
-					if (DesiredSpeed1 > 0.0) {
+					if (DesiredSpeed1 > 0.002) {
 						if (total1 > (float)MOTOR_SPEED_MAX) total1 = (float)MOTOR_SPEED_MAX;
 						cmd_motor1 = (total1 > 0.0f) ? (int16_t)total1 : 0;
-					} else if (DesiredSpeed1 < 0.0) {
+					} else if (DesiredSpeed1 < -0.002) {
 						if (total1 < -(float)MOTOR_SPEED_MAX) total1 = -(float)MOTOR_SPEED_MAX;
 						cmd_motor1 = (total1 < 0.0f) ? (int16_t)total1 : 0;
 					} else {
 						cmd_motor1 = 0;
 					}
 
-					if (DesiredSpeed2 > 0.0) {
+					if (DesiredSpeed2 > 0.002) {
 						if (total2 > (float)MOTOR_SPEED_MAX) total2 = (float)MOTOR_SPEED_MAX;
 						cmd_motor2 = (total2 > 0.0f) ? (int16_t)total2 : 0;
-					} else if (DesiredSpeed2 < 0.0) {
+					} else if (DesiredSpeed2 < -0.002) {
 						if (total2 < -(float)MOTOR_SPEED_MAX) total2 = -(float)MOTOR_SPEED_MAX;
 						cmd_motor2 = (total2 < 0.0f) ? (int16_t)total2 : 0;
 					} else {
@@ -1693,8 +1737,8 @@ static void cmdvel_cb(const void * msgin)
     const float V_DEADBAND = 0.0005f;   // m/s  ignore tiny MPPI noise
     const float W_DEADBAND = 0.005f;    // rad/s
 
-    const float V_MIN_EFF  = 0.05f;    // m/s  minimum that actually moves your robot
-    const float W_MIN_EFF  = 0.25f;    // rad/s minimum rotate to break stiction
+    const float V_MIN_EFF  = 0.02f;    // m/s  minimum that actually moves your robot (phu hop tran 0.08 m/s)
+    const float W_MIN_EFF  = 0.08f;    // rad/s minimum rotate to break stiction
 
     // If MPPI asks to move/turn slightly, boost above stiction threshold
     v = apply_deadband_and_min(v, V_DEADBAND, V_MIN_EFF);
@@ -1973,7 +2017,7 @@ void StartTeleopTask(void *argument)
                         float ry_n = (float)ry / 127.0f;      // -1..1
 
                         v_cmd = (-ry_n) * V_MAX;
-                        w_cmd = ( rx_n) * W_MAX;
+                        w_cmd = (-rx_n) * W_MAX;  // Can gat trai (rx_n < 0) -> w_cmd > 0 (re trai chuan ROS)
 
                     } else {
                         bool up    = is_pressed(st.buttons, PSB_UP);
@@ -1986,9 +2030,9 @@ void StartTeleopTask(void *argument)
                         } else if (down && !up && !left && !right) {
                             v_cmd = -V_STEP;  w_cmd = 0.0f;
                         } else if (left && !up && !down && !right) {
-                            v_cmd = 0.0f;     w_cmd = -W_STEP;
+                            v_cmd = 0.0f;     w_cmd = +W_STEP;  // Re trai chieu duong w > 0 (v_r tien, v_l lui)
                         } else if (right && !up && !down && !left) {
-                            v_cmd = 0.0f;     w_cmd = +W_STEP;
+                            v_cmd = 0.0f;     w_cmd = -W_STEP;  // Re phai chieu am w < 0 (v_r lui, v_l tien)
                         } else {
                             v_cmd = 0.0f;     w_cmd = 0.0f;
                         }

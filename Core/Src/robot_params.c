@@ -19,8 +19,10 @@ double CurPos2 = 0, CurSpeed2 = 0, PosPIDOut2 = 0, SpeedPIDOut2 = 0, DesiredPos2
 
 double Spd1_cmdfromROS = 0, Spd2_cmdfromROS = 0;
 
-double Kp1 = 120, Ki1 = 15, Kd1 = 0;
-double Kp2 = 120, Ki2 = 15, Kd2 = 0;
+// Thông số PID tối ưu cho tải nặng ~50kg (2 bánh hoverboard 6.5" + 4 bánh đa hướng):
+// Kp=250 phản ứng vững vàng, hỗ trợ đắc lực khi 4 bánh đa hướng ghì tải; Ki=60 bù tích phân mượt mà
+double Kp1 = 250, Ki1 = 60, Kd1 = 0;
+double Kp2 = 250, Ki2 = 60, Kd2 = 0;
 
 double Kp_fromLCD1=2500, Ki_fromLCD1=350, Kd_fromLCD1=0;
 double Kp_fromLCD2=2500, Ki_fromLCD2=350, Kd_fromLCD2=0;
@@ -29,6 +31,11 @@ uint8_t pid_update_pending = 0;  //biến dùng để update PID từ ROS
 
 float g_revCount1 = 0.0f;
 float g_revCount2 = 0.0f;
+
+// Biến trạng thái Vòng tham chiếu đồng bộ 2 bánh xe
+volatile float g_sync_e_pos = 0.0f;
+volatile float g_sync_v_corr = 0.0f;
+volatile uint8_t g_sync_active = 0;
 
 
 
