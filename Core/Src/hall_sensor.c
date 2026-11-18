@@ -343,6 +343,7 @@ float Hall_GetSpeed_mps(int id, float dt)
     if (id != HALL_MOTOR_LEFT && id != HALL_MOTOR_RIGHT) {
         return 0.0f;
     }
+    (void)dt; /* Kept for API compatibility; low-rate Hall speed uses edge timestamps. */
 
     float ticks_per_wheel_rev = (id == HALL_MOTOR_LEFT) ? HALL_TICKS_PER_REV_L : HALL_TICKS_PER_REV_R;
     if (ticks_per_wheel_rev < 1.0f) {
@@ -365,7 +366,7 @@ float Hall_GetSpeed_mps(int id, float dt)
         __enable_irq();
     }
 
-    /* 1. Tính delta ticks giữa 2 lần gọi (chu kỳ dt = 5ms) */
+    /* 1. Tính delta ticks giữa 2 lần gọi; chỉ dùng để xác nhận đã hết timeout. */
     int32_t delta_ticks = cur_count - g_hall_prev_count[id];
     g_hall_prev_count[id] = cur_count;
 
@@ -400,13 +401,8 @@ float Hall_GetSpeed_mps(int id, float dt)
         int8_t dir_mult = (id == HALL_MOTOR_LEFT) ? (int8_t)MOTOR_LEFT_DIRECTION : (int8_t)MOTOR_RIGHT_DIRECTION;
         raw_speed = v_calc * (float)(last_dir * dir_mult);
     } else {
-        /* Fallback dự phòng trực tiếp từ delta_ticks: đảm bảo không bao giờ bị kẹt 0 khi bánh quay */
-        if (delta_ticks != 0 && dt > 1e-4f) {
-            float rev_per_sec = ((float)delta_ticks / dt) / ticks_per_wheel_rev;
-            raw_speed = rev_per_sec * WHEEL_CIRC_M;
-        } else {
-            raw_speed = g_hall_speed_filtered[id];
-        }
+        /* Không dùng delta_ticks / chu kỳ task 5 ms: một xung Hall đơn lẻ sẽ tạo gai vận tốc giả. */
+        raw_speed = g_hall_speed_filtered[id];
     }
 
     /* 3. Bộ lọc thông thấp bậc 1 (alpha = 0.15) làm mượt hoàn hảo tín hiệu cho PID, triệt tiêu gai xung Hall */

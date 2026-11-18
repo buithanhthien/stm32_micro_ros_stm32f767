@@ -20,9 +20,9 @@ double CurPos2 = 0, CurSpeed2 = 0, PosPIDOut2 = 0, SpeedPIDOut2 = 0, DesiredPos2
 double Spd1_cmdfromROS = 0, Spd2_cmdfromROS = 0;
 
 // Thông số PID tối ưu cho tải nặng ~50kg (2 bánh hoverboard 6.5" + 4 bánh đa hướng):
-// Kp=250 phản ứng vững vàng, hỗ trợ đắc lực khi 4 bánh đa hướng ghì tải; Ki=60 bù tích phân mượt mà
-double Kp1 = 250, Ki1 = 60, Kd1 = 0;
-double Kp2 = 250, Ki2 = 60, Kd2 = 0;
+// Kp=220 phản ứng vững vàng, không gây giật PWM; Ki=50 bù tích phân mượt mà không vọt lố
+double Kp1 = 220, Ki1 = 50, Kd1 = 0;
+double Kp2 = 220, Ki2 = 50, Kd2 = 0;
 
 double Kp_fromLCD1=2500, Ki_fromLCD1=350, Kd_fromLCD1=0;
 double Kp_fromLCD2=2500, Ki_fromLCD2=350, Kd_fromLCD2=0;
@@ -36,6 +36,13 @@ float g_revCount2 = 0.0f;
 volatile float g_sync_e_pos = 0.0f;
 volatile float g_sync_v_corr = 0.0f;
 volatile uint8_t g_sync_active = 0;
+
+// Hệ thống Telemetry Logging (Ring Buffer RAM & Live Watch)
+RobotTelemetry_t g_telemetry_buf[TELEMETRY_LOG_SIZE];
+volatile RobotTelemetry_t g_telemetry_latest = {0};
+volatile uint16_t g_telemetry_idx = 0;
+volatile uint32_t g_telemetry_total_samples = 0;
+volatile uint8_t  g_telemetry_enable_uart = 1;  // Mặc định bật truyền UART3 (115200 baud)
 
 
 

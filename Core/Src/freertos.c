@@ -309,6 +309,65 @@ static inline void MotorData_Publish(float pwm1, float pwm2)
   (void)pwm1; (void)pwm2;
 }
 
+/* ====================================================================
+ * HÀM GHI TELEMETRY LOG (Lưu RAM & Phát UART3 định kỳ)
+ * ==================================================================== */
+static uint32_t millis_void(void);
+
+void Robot_Record_Telemetry(float v_cmd, float w_cmd,
+                            float des_v1, float cur_v1, int16_t pwm1, int32_t enc1,
+                            float des_v2, float cur_v2, int16_t pwm2, int32_t enc2,
+                            float e_sync, float v_corr, uint8_t sync_act)
+{
+    uint32_t now = millis_void();
+
+    RobotTelemetry_t entry;
+    entry.time_ms   = now;
+    entry.v_cmd     = v_cmd;
+    entry.w_cmd     = w_cmd;
+    entry.des_v1    = des_v1;
+    entry.cur_v1    = cur_v1;
+    entry.pwm1      = pwm1;
+    entry.enc1      = enc1;
+    entry.des_v2    = des_v2;
+    entry.cur_v2    = cur_v2;
+    entry.pwm2      = pwm2;
+    entry.enc2      = enc2;
+    entry.e_sync    = e_sync;
+    entry.v_corr    = v_corr;
+    entry.sync_act  = sync_act;
+
+    // 1. Lưu vào Ring Buffer RAM (xem được trực tiếp trên STM32CubeIDE Expressions / Live Watch)
+    g_telemetry_buf[g_telemetry_idx] = entry;
+    g_telemetry_idx = (uint16_t)((g_telemetry_idx + 1U) % TELEMETRY_LOG_SIZE);
+    g_telemetry_total_samples++;
+    g_telemetry_latest = entry;
+
+    // 2. Xuất dữ liệu qua UART3 dạng chuỗi CSV chuẩn
+    // Định dạng: $LOG,time,v_cmd,w_cmd,des1,cur1,pwm1,enc1,des2,cur2,pwm2,enc2,e_sync,v_corr,sync\r\n
+    if (g_telemetry_enable_uart) {
+        static char uart_log_buf[140];
+        int len = snprintf(uart_log_buf, sizeof(uart_log_buf),
+            "$LOG,%lu,%.3f,%.3f,%.3f,%.3f,%d,%ld,%.3f,%.3f,%d,%ld,%.4f,%.3f,%u\r\n",
+            (unsigned long)entry.time_ms,
+            entry.v_cmd, entry.w_cmd,
+            entry.des_v1, entry.cur_v1, (int)entry.pwm1, (long)entry.enc1,
+            entry.des_v2, entry.cur_v2, (int)entry.pwm2, (long)entry.enc2,
+            entry.e_sync, entry.v_corr, (unsigned int)entry.sync_act
+        );
+
+        if (len > 0 && len < (int)sizeof(uart_log_buf)) {
+            // Truyền non-blocking / chỉ truyền khi UART đang rảnh để không làm trễ chu kỳ điều khiển
+            if (huart3.gState == HAL_UART_STATE_READY) {
+#if defined(__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
+                SCB_CleanDCache_by_Addr((uint32_t *)uart_log_buf, sizeof(uart_log_buf));
+#endif
+                HAL_UART_Transmit_DMA(&huart3, (uint8_t *)uart_log_buf, (uint16_t)len);
+            }
+        }
+    }
+}
+
 #if ENABLE_MICROROS
 static bool microros_odom_init(rcl_node_t * node);
 static void microros_odom_fini(rcl_node_t *node);
@@ -1268,14 +1327,32 @@ void EncoderTask(void *argument)
 	const TickType_t period = pdMS_TO_TICKS(ENCODER_PERIOD_MS);
 	TickType_t lastWake = xTaskGetTickCount();
 
+	static float s_spd1_filt = 0.0f;
+	static float s_spd2_filt = 0.0f;
+
   for(;;)
   {
-    // Đọc count mở rộng
+    // Đọc count mở rộng từ Hall Sensor
 	g_encCount1 = Encoder_GetCount(ENCODER_1);
     g_encCount2 = Encoder_GetCount(ENCODER_2);
 
-    g_speed1_mps = Encoder_GetSpeed_mps(ENCODER_1,DT_TIME);
-    g_speed2_mps = Encoder_GetSpeed_mps(ENCODER_2,DT_TIME);
+    float raw_v1 = Encoder_GetSpeed_mps(ENCODER_1, DT_TIME);
+    float raw_v2 = Encoder_GetSpeed_mps(ENCODER_2, DT_TIME);
+
+    // Kẹp ngưỡng vật lý an toàn chống gai xung Hall bất thường (|v| <= 0.25 m/s)
+    raw_v1 = clampf(raw_v1, -0.25f, 0.25f);
+    raw_v2 = clampf(raw_v2, -0.25f, 0.25f);
+
+    // Bộ lọc thông thấp EMA bậc 1 (alpha = 0.30) làm mượt phản hồi cho PID
+    const float alpha_enc = 0.30f;
+    s_spd1_filt = alpha_enc * raw_v1 + (1.0f - alpha_enc) * s_spd1_filt;
+    s_spd2_filt = alpha_enc * raw_v2 + (1.0f - alpha_enc) * s_spd2_filt;
+
+    if (fabsf(s_spd1_filt) < 0.003f && fabsf(raw_v1) < 0.001f) s_spd1_filt = 0.0f;
+    if (fabsf(s_spd2_filt) < 0.003f && fabsf(raw_v2) < 0.001f) s_spd2_filt = 0.0f;
+
+    g_speed1_mps = s_spd1_filt;
+    g_speed2_mps = s_spd2_filt;
 
     taskENTER_CRITICAL();
     CurSpeed1 = (double)g_speed1_mps;
@@ -1304,6 +1381,10 @@ void MotorControlTask(void *argument)
 	static double smoothed_speed1 = 0.0;
 	static double smoothed_speed2 = 0.0;
 
+	static int16_t s_last_cmd_m1 = 0;
+	static int16_t s_last_cmd_m2 = 0;
+	static uint32_t s_telemetry_timer = 0;
+
 	for (;;)
 	    {
 			//update thông số PID nếu có thay đổi
@@ -1321,15 +1402,19 @@ void MotorControlTask(void *argument)
 				if (pid_mutex) xSemaphoreGive(pid_mutex);
 			}
 
+			float teleop_v_r = 0.0f;
+			float teleop_v_l = 0.0f;
+
 			if (modCtrl == MP_MODE_POSITION) {
 				PID_Compute(&PosPID1);
 				PID_Compute(&PosPID2);
 				MotorData_Publish(PosPIDOut1, PosPIDOut2);  //update PWM data for LCD display
+				s_last_cmd_m1 = (int16_t)PosPIDOut1;
+				s_last_cmd_m2 = (int16_t)PosPIDOut2;
 				Motor_SetSpeed(MOTOR_1,PosPIDOut1);
 				Motor_SetSpeed(MOTOR_2,PosPIDOut2);
 			} else {
 				// TeleopTask publishes raw wheel commands; this task owns the PID setpoints.
-				float teleop_v_r, teleop_v_l;
 				get_teleop_wheel_cmd(&teleop_v_r, &teleop_v_l);
 
 				//Decide whether to enable heading hold (straight mode detection with latch)
@@ -1344,7 +1429,7 @@ void MotorControlTask(void *argument)
 				// =================================================================
 				// Khac phuc triet de hien tuong truot banh hoac mat bam khi di thang.
 				// Ap dung cho CA 2 CHE DO: Tu hanh ROS va Lai tay PS2.
-				// Kich hoat khi da qua giai doan de-ba (fabsf(v_avg_cmd) >= EPS_MOVE_MPS) de khong lam lech huong ban dau.
+				// Ap dung cho ca ROS va PS2 sau khi co lenh chay thang tren 0.01 m/s.
 				static uint8_t s_sync_active = 0;
 				static double s_pos1_start = 0.0;
 				static double s_pos2_start = 0.0;
@@ -1381,20 +1466,20 @@ void MotorControlTask(void *argument)
 					float e_sync = (float)(delta_s1 - delta_s2);
 					float e_v    = (float)((cur_v1 - cur_v2) * (double)dir_sgn);
 
-					// Vung chet 1 xung Hall (~5.76mm) de tranh giat lac do luong tu hoa:
-					float e_sync_eff = e_sync;
-					if (fabsf(e_sync_eff) < 0.006f) {
-						e_sync_eff = 0.0f;
+					// Deadband loc rung giat: khoang 1 xung Hall (~5.76mm)
+					float e_sync_eff = 0.0f;
+					if (fabsf(e_sync) > SYNC_DEADBAND_M) {
+						e_sync_eff = (e_sync > 0.0f) ? (e_sync - SYNC_DEADBAND_M) : (e_sync + SYNC_DEADBAND_M);
 					}
 
 					// Tinh luong bu van toc sua doi (PD Reference Loop):
 					v_sync_corr = (SYNC_KP * e_sync_eff) + (SYNC_KD * e_v);
 
-					// Dynamic Clamping: Gioi han luong bu toi da 20% van toc hien tai
-					// Dam bao luong bu luon nho hon rat nhieu so voi lenh tien, khong the gay xoay xe:
-					float max_corr = 0.20f * fabsf(v_avg_cmd);
+					// Dynamic Clamping: Cho phep vong dong bo bu toi da 50% van toc hien tai de nan thang dut khoat
+					// Dam bao luong bu nam trong gioi han an toan V_SYNC_CORR_MAX
+					float max_corr = 0.50f * fabsf(v_avg_cmd);
 					if (max_corr > V_SYNC_CORR_MAX) max_corr = V_SYNC_CORR_MAX;
-					if (max_corr < 0.002f) max_corr = 0.002f;
+					if (max_corr < 0.005f) max_corr = 0.005f;
 					v_sync_corr = clampf(v_sync_corr, -max_corr, max_corr);
 
 					// Cap nhat bien giam sat Live Debug
@@ -1403,7 +1488,7 @@ void MotorControlTask(void *argument)
 					g_sync_active = 1;
 
 					// Dieu chinh lenh toc do truoc khi vao Ramping:
-					// Banh phai di nhanh hon -> giam vR, tang vL de nhe nhang giu xe thang tap
+					// Banh phai di nhanh hon -> giam vR, tang vL; Banh trai di nhanh hon -> giam vL, tang vR
 					vR_ref_cmd -= dir_sgn * v_sync_corr;
 					vL_ref_cmd += dir_sgn * v_sync_corr;
 				} else {
@@ -1431,10 +1516,10 @@ void MotorControlTask(void *argument)
 				Apply_Robot_Ramping(&smoothed_speed2, (double)vL_cmd);
 
 				// ==========================================
-				// DUNG DONG CO EM AI KHI BUONG CAN (Nguong 0.002 m/s cho robot 1.6m)
+				// DUNG DONG CO EM AI KHI BUONG CAN (Nguong 0.005 m/s)
 				// ==========================================
-				if (fabs(teleop_v_r) < 0.002f && fabs(teleop_v_l) < 0.002f &&
-				    fabs(smoothed_speed1) < 0.002 && fabs(smoothed_speed2) < 0.002) {
+				if (fabs(teleop_v_r) < 0.005f && fabs(teleop_v_l) < 0.005f &&
+				    fabs(smoothed_speed1) < 0.005 && fabs(smoothed_speed2) < 0.005) {
 					// Da dung han: reset tich phan PID va khoa cong suat ve 0
 					smoothed_speed1 = 0.0;
 					smoothed_speed2 = 0.0;
@@ -1446,6 +1531,8 @@ void MotorControlTask(void *argument)
 					SpeedPIDOut2 = 0;
 					Motor_SetSpeed(MOTOR_1, 0);
 					Motor_SetSpeed(MOTOR_2, 0);
+					s_last_cmd_m1 = 0;
+					s_last_cmd_m2 = 0;
 				} else {
 					// Cập nhật giá trị mục tiêu đã làm mượt cho PID tính toán
 					DesiredSpeed1 = smoothed_speed1;
@@ -1456,44 +1543,38 @@ void MotorControlTask(void *argument)
 					PID_Compute(&SpeedPID1);
 					PID_Compute(&SpeedPID2);
 
-					// Chống bão hòa tích phân (Anti-Windup):
-					// Khi đang có lệnh tiến, không cho tích phân âm làm triệt tiêu công suất khiến motor chết đứng
-					if (DesiredSpeed1 > 0.0) {
-						if (SpeedPID1.OutputSum < 0.0) SpeedPID1.OutputSum = 0.0;
-					} else if (DesiredSpeed1 < 0.0) {
-						if (SpeedPID1.OutputSum > 0.0) SpeedPID1.OutputSum = 0.0;
-					}
+					// Chống bão hòa tích phân (Anti-Windup) hai chiều:
+					// Cho phép tích phân PID đi âm (tối đa -80 PWM) để ghìm tốc bánh xe khi chạy nhanh hơn lệnh
+					if (SpeedPID1.OutputSum > 80.0)  SpeedPID1.OutputSum = 80.0;
+					if (SpeedPID1.OutputSum < -80.0) SpeedPID1.OutputSum = -80.0;
 
-					if (DesiredSpeed2 > 0.0) {
-						if (SpeedPID2.OutputSum < 0.0) SpeedPID2.OutputSum = 0.0;
-					} else if (DesiredSpeed2 < 0.0) {
-						if (SpeedPID2.OutputSum > 0.0) SpeedPID2.OutputSum = 0.0;
-					}
+					if (SpeedPID2.OutputSum > 80.0)  SpeedPID2.OutputSum = 80.0;
+					if (SpeedPID2.OutputSum < -80.0) SpeedPID2.OutputSum = -80.0;
 					taskEXIT_CRITICAL();
 
 					MotorData_Publish(SpeedPIDOut1, SpeedPIDOut2);  //update PWM data for LCD display
 
 					// 1. Bu truoc Feedforward van toc ket hop Ramped Stiction Compensation:
-					// Tang doc tuyen tinh lien tuc tu 0 -> MOTOR_MIN_PWM (125 PWM) trong dai [0 .. 0.02 m/s].
-					// Giup triet tieu hoan toan cu giat buoc nhay dien ap khi de-ba,
-					// dong thoi cung cap du 100% luc keo manh me de Banh 1 va Banh 2 cung thang ma sat 50kg.
+					// Dãn dốc tuyến tính từ 0 -> MIN_PWM trong khoảng [0 .. 0.04 m/s]
+					// Bánh 1 được cấp MOTOR1_MIN_PWM (138) bù trừ ma sát cao hơn để không bị yếu
+					// Bánh 2 được cấp MOTOR2_MIN_PWM (122) tránh vọt sớm gây lệch hướng
 					float ff1 = 0.0f;
 					float ff2 = 0.0f;
 
 					float abs_v1 = fabsf((float)DesiredSpeed1);
 					if (abs_v1 > 0.001f) {
-						float r1 = abs_v1 / 0.02f;
+						float r1 = abs_v1 / 0.04f;
 						if (r1 > 1.0f) r1 = 1.0f;
-						float ff_base1 = r1 * MOTOR_MIN_PWM;
+						float ff_base1 = r1 * MOTOR1_MIN_PWM;
 						float ff_dyn1  = abs_v1 * MOTOR_FEEDFORWARD_KV;
 						ff1 = copysignf(ff_base1 + ff_dyn1, (float)DesiredSpeed1);
 					}
 
 					float abs_v2 = fabsf((float)DesiredSpeed2);
 					if (abs_v2 > 0.001f) {
-						float r2 = abs_v2 / 0.02f;
+						float r2 = abs_v2 / 0.04f;
 						if (r2 > 1.0f) r2 = 1.0f;
-						float ff_base2 = r2 * MOTOR_MIN_PWM;
+						float ff_base2 = r2 * MOTOR2_MIN_PWM;
 						float ff_dyn2  = abs_v2 * MOTOR_FEEDFORWARD_KV;
 						ff2 = copysignf(ff_base2 + ff_dyn2, (float)DesiredSpeed2);
 					}
@@ -1529,7 +1610,32 @@ void MotorControlTask(void *argument)
 
 					Motor_SetSpeed(MOTOR_1, cmd_motor1);
 					Motor_SetSpeed(MOTOR_2, cmd_motor2);
+					s_last_cmd_m1 = cmd_motor1;
+					s_last_cmd_m2 = cmd_motor2;
 				}
+			}
+
+			// ====================================================================
+			// GHI LOG TELEMETRY (RAM Buffer & UART3 CSV stream định kỳ 50ms / 20Hz)
+			// ====================================================================
+			s_telemetry_timer += MOTORCONTROL_PERIOD_MS;
+			if (s_telemetry_timer >= UART_PERIOD_MS) {
+				s_telemetry_timer = 0;
+
+				float log_v_cmd = 0.5f * (teleop_v_r + teleop_v_l);
+				float log_w_cmd = (teleop_v_r - teleop_v_l) / WHEEL_BASE_M;
+
+				taskENTER_CRITICAL();
+				double cur_spd1 = CurSpeed1;
+				double cur_spd2 = CurSpeed2;
+				int32_t enc1    = g_encCount1;
+				int32_t enc2    = g_encCount2;
+				taskEXIT_CRITICAL();
+
+				Robot_Record_Telemetry(log_v_cmd, log_w_cmd,
+				                       (float)DesiredSpeed1, (float)cur_spd1, s_last_cmd_m1, enc1,
+				                       (float)DesiredSpeed2, (float)cur_spd2, s_last_cmd_m2, enc2,
+				                       g_sync_e_pos, g_sync_v_corr, g_sync_active);
 			}
 
 			vTaskDelayUntil(&lastWake, period);
@@ -2017,7 +2123,7 @@ void StartTeleopTask(void *argument)
                         float ry_n = (float)ry / 127.0f;      // -1..1
 
                         v_cmd = (-ry_n) * V_MAX;
-                        w_cmd = (-rx_n) * W_MAX;  // Can gat trai (rx_n < 0) -> w_cmd > 0 (re trai chuan ROS)
+					w_cmd = (+rx_n) * W_MAX;  // Đảo dấu theo chiều trái/phải thực tế của tay cầm PS2
 
                     } else {
                         bool up    = is_pressed(st.buttons, PSB_UP);
@@ -2030,9 +2136,9 @@ void StartTeleopTask(void *argument)
                         } else if (down && !up && !left && !right) {
                             v_cmd = -V_STEP;  w_cmd = 0.0f;
                         } else if (left && !up && !down && !right) {
-                            v_cmd = 0.0f;     w_cmd = +W_STEP;  // Re trai chieu duong w > 0 (v_r tien, v_l lui)
+							v_cmd = 0.0f;     w_cmd = -W_STEP;  // Tay cầm trái: đảo dấu theo chiều quay thực tế
                         } else if (right && !up && !down && !left) {
-                            v_cmd = 0.0f;     w_cmd = -W_STEP;  // Re phai chieu am w < 0 (v_r lui, v_l tien)
+							v_cmd = 0.0f;     w_cmd = +W_STEP;  // Tay cầm phải: đảo dấu theo chiều quay thực tế
                         } else {
                             v_cmd = 0.0f;     w_cmd = 0.0f;
                         }
