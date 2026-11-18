@@ -1327,9 +1327,6 @@ void EncoderTask(void *argument)
 	const TickType_t period = pdMS_TO_TICKS(ENCODER_PERIOD_MS);
 	TickType_t lastWake = xTaskGetTickCount();
 
-	static float s_spd1_filt = 0.0f;
-	static float s_spd2_filt = 0.0f;
-
   for(;;)
   {
     // Đọc count mở rộng từ Hall Sensor
@@ -1343,16 +1340,13 @@ void EncoderTask(void *argument)
     raw_v1 = clampf(raw_v1, -0.25f, 0.25f);
     raw_v2 = clampf(raw_v2, -0.25f, 0.25f);
 
-    // Bộ lọc thông thấp EMA bậc 1 (alpha = 0.30) làm mượt phản hồi cho PID
-    const float alpha_enc = 0.30f;
-    s_spd1_filt = alpha_enc * raw_v1 + (1.0f - alpha_enc) * s_spd1_filt;
-    s_spd2_filt = alpha_enc * raw_v2 + (1.0f - alpha_enc) * s_spd2_filt;
+    // EMA đã có bên trong hall_sensor.c (alpha=0.15) — không lọc thêm để tránh trễ kép 160-300ms
+    // Zero-snap: tránh float noise khi xe đứng yên
+    if (fabsf(raw_v1) < 0.003f) raw_v1 = 0.0f;
+    if (fabsf(raw_v2) < 0.003f) raw_v2 = 0.0f;
 
-    if (fabsf(s_spd1_filt) < 0.003f && fabsf(raw_v1) < 0.001f) s_spd1_filt = 0.0f;
-    if (fabsf(s_spd2_filt) < 0.003f && fabsf(raw_v2) < 0.001f) s_spd2_filt = 0.0f;
-
-    g_speed1_mps = s_spd1_filt;
-    g_speed2_mps = s_spd2_filt;
+    g_speed1_mps = raw_v1;
+    g_speed2_mps = raw_v2;
 
     taskENTER_CRITICAL();
     CurSpeed1 = (double)g_speed1_mps;
@@ -1544,12 +1538,13 @@ void MotorControlTask(void *argument)
 					PID_Compute(&SpeedPID2);
 
 					// Chống bão hòa tích phân (Anti-Windup) hai chiều:
-					// Cho phép tích phân PID đi âm (tối đa -80 PWM) để ghìm tốc bánh xe khi chạy nhanh hơn lệnh
-					if (SpeedPID1.OutputSum > 80.0)  SpeedPID1.OutputSum = 80.0;
-					if (SpeedPID1.OutputSum < -80.0) SpeedPID1.OutputSum = -80.0;
+					// Mở rộng lên ±400 PWM để tích phân đủ sức bù sai lệch tốc độ lớn.
+					// PID_SetOutputLimits đã giới hạn output cuối ở ±MOTOR_SPEED_MAX=1200.
+					if (SpeedPID1.OutputSum >  400.0)  SpeedPID1.OutputSum =  400.0;
+					if (SpeedPID1.OutputSum < -400.0)  SpeedPID1.OutputSum = -400.0;
 
-					if (SpeedPID2.OutputSum > 80.0)  SpeedPID2.OutputSum = 80.0;
-					if (SpeedPID2.OutputSum < -80.0) SpeedPID2.OutputSum = -80.0;
+					if (SpeedPID2.OutputSum >  400.0)  SpeedPID2.OutputSum =  400.0;
+					if (SpeedPID2.OutputSum < -400.0)  SpeedPID2.OutputSum = -400.0;
 					taskEXIT_CRITICAL();
 
 					MotorData_Publish(SpeedPIDOut1, SpeedPIDOut2);  //update PWM data for LCD display

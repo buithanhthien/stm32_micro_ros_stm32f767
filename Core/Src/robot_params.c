@@ -21,8 +21,8 @@ double Spd1_cmdfromROS = 0, Spd2_cmdfromROS = 0;
 
 // Thông số PID tối ưu cho tải nặng ~50kg (2 bánh hoverboard 6.5" + 4 bánh đa hướng):
 // Kp=220 phản ứng vững vàng, không gây giật PWM; Ki=50 bù tích phân mượt mà không vọt lố
-double Kp1 = 220, Ki1 = 50, Kd1 = 0;
-double Kp2 = 220, Ki2 = 50, Kd2 = 0;
+double Kp1 = 1800, Ki1 = 800, Kd1 = 0;
+double Kp2 = 1800, Ki2 = 800, Kd2 = 0;
 
 double Kp_fromLCD1=2500, Ki_fromLCD1=350, Kd_fromLCD1=0;
 double Kp_fromLCD2=2500, Ki_fromLCD2=350, Kd_fromLCD2=0;

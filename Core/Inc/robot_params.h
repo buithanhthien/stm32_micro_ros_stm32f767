@@ -44,8 +44,8 @@
  * - Motor Trái (Motor 2): Khi tiến cơ học, thứ tự pha Hall sinh step = -1 -> cần nhân (-1) để đếm DƯƠNG (+)
  * - Motor Phải (Motor 1): Khi tiến cơ học, thứ tự pha Hall sinh step = +1 -> cần nhân (+1) để đếm DƯƠNG (+)
  */
-#define MOTOR_LEFT_DIRECTION      (-1)    /* Motor Trái: (-1) để đảo dấu step=-1 thành DƯƠNG (+) khi tiến */
-#define MOTOR_RIGHT_DIRECTION     (+1)    /* Motor Phải: (+1) để giữ nguyên step=+1 thành DƯƠNG (+) khi tiến */
+#define MOTOR_LEFT_DIRECTION      (+1)    /* Motor Trái: (-1) để đảo dấu step=-1 thành DƯƠNG (+) khi tiến */
+#define MOTOR_RIGHT_DIRECTION     (-1)    /* Motor Phải: (+1) để giữ nguyên step=+1 thành DƯƠNG (+) khi tiến */
 
 /**
  * Số cạnh chuyển trạng thái Hall trên 1 vòng quay bánh xe:
@@ -82,9 +82,9 @@
 // Mức bù công suất ma sát tĩnh cơ bản (Stiction Offset PWM) cho tải nặng 50kg:
 // Bánh 1 (Phải) có ma sát tĩnh cơ học cao hơn -> cấp 140 PWM để đủ lực đẩy.
 // Bánh 2 (Trái) trơn nhẹ hơn nhiều -> hạ xuống 98 PWM để triệt tiêu hiện tượng Bánh 2 chạy nhanh hơn Bánh 1.
-#define MOTOR1_MIN_PWM         140.0f   // Bánh 1 (Phải): tăng lực kéo để thắng ma sát tĩnh
-#define MOTOR2_MIN_PWM         98.0f    // Bánh 2 (Trái): hạ thấp để không bị chạy nhanh hơn bánh 1
-#define MOTOR_MIN_PWM          120.0f   // Giá trị danh định chung
+#define MOTOR1_MIN_PWM         100.0f   // Bánh 1 (Phải): tăng lực kéo để thắng ma sát tĩnh
+#define MOTOR2_MIN_PWM         100.0f    // Bánh 2 (Trái): hạ thấp để không bị chạy nhanh hơn bánh 1
+#define MOTOR_MIN_PWM          100.0f   // Giá trị danh định chung
 
 // Hệ số bù trước Feedforward vận tốc động (Dynamic Feedforward)
 #define MOTOR_FEEDFORWARD_KV   320.0f

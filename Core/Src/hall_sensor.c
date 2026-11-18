@@ -123,26 +123,42 @@ static inline uint8_t Hall_ReadState_Right(void)
     return (uint8_t)((hc << 2U) | (hb << 1U) | ha);
 }
 
+/* Ngưỡng lọc nhiễu dội cao tần (Anti-glitch filter):
+ * Tốc độ xe tối đa 0.08 m/s (1 tick = 5.76mm -> chu kỳ cạnh > 72ms).
+ * Ngay cả khi quay tự do 500 RPM, chu kỳ cạnh cũng > 1.3ms.
+ * Mọi cạnh đến nhanh hơn 80 µs (17,280 CPU cycles @ 216MHz) là nhiễu xung điện từ (EMI) từ cuộn dây động cơ. */
+#define HALL_MIN_EDGE_CYCLES    17280U  /* 80 µs @ 216 MHz */
+
 /**
  * @brief Xử lý cập nhật Hall trong ISR (cực nhanh, không float, không block)
  */
 static inline void Hall_Process_ISR(int id, uint8_t curr_state)
 {
+    uint32_t now = DWT->CYCCNT;
+    uint32_t dt = now - g_hall_last_edge_dwt[id];
+
+    /* 1. Lọc bỏ nhiễu dội cao tần (Glitch Filter):
+     * Nếu 2 ngắt đến cách nhau dưới 80 microsecond, bỏ qua xung nhiễu này để bảo vệ bộ đếm không bị tràn số. */
+    if (dt < HALL_MIN_EDGE_CYCLES && g_hall_last_edge_dwt[id] != 0U) {
+        return;
+    }
+
     uint8_t prev = g_hall_prev_state[id];
 
-    /* Bỏ qua nếu trạng thái không đổi (nhiễu rung cạnh) hoặc không hợp lệ */
+    /* Bỏ qua nếu trạng thái không đổi (nhiễu rung cạnh) */
     if (curr_state == prev) {
         return;
     }
+
+    /* Trạng thái không hợp lệ của Hall 3 pha: 0 (000b) hoặc 7 (111b) => mất nguồn/tuột dây */
     if (curr_state == 0U || curr_state == 7U) {
         g_hall_err_count[id]++;
+        g_hall_last_edge_dwt[id] = now;
         return;
     }
 
     int8_t step = hall_transition_table[prev][curr_state];
     if (step != 0) {
-        uint32_t now = DWT->CYCCNT;
-        uint32_t dt = now - g_hall_last_edge_dwt[id];
         g_hall_last_edge_dwt[id] = now;
         g_hall_edge_period_cycles[id] = dt;
         g_hall_last_dir[id] = step;
@@ -160,6 +176,7 @@ static inline void Hall_Process_ISR(int id, uint8_t curr_state)
     } else {
         /* Chuyển trạng thái bất thường (nhảy 2 bit do nhiễu hoặc mất cạnh) */
         g_hall_err_count[id]++;
+        g_hall_last_edge_dwt[id] = now;
         /* Tự đồng bộ lại trạng thái hiện tại để bắt các cạnh kế tiếp */
         g_hall_prev_state[id] = curr_state;
     }
