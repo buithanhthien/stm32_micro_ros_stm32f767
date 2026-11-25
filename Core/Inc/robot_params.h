@@ -63,7 +63,7 @@
  * ==================================================================== */
 #define WHEEL_DIAMETER_M   0.1651f     // Đường kính bánh xe (10 cm)
 #define WHEEL_CIRC_M       (3.1415926f * WHEEL_DIAMETER_M)
-#define WHEEL_BASE_M       0.292f    // Khoảng cách 2 bánh xe (m)
+#define WHEEL_BASE_M       0.545f    // Khoảng cách 2 bánh xe (m)
 
 /* Hệ số hiệu chuẩn quãng đường riêng mỗi bánh sau khi chạy thử trên mặt phẳng. */
 #define ODOM_LEFT_SCALE    1.0f
