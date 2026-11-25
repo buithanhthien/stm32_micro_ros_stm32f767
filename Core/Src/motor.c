@@ -19,10 +19,8 @@
 #define MOTOR2_DIR_Pin         GPIO_PIN_13   // PE13
 
 // Hướng quay thực tế của 2 động cơ (để 2 bánh cùng quay TIẾN khi SpeedPIDOut > 0):
-// Motor 1 / Bánh phải: DIR1=SET (1) khi tiến cơ học
-// Motor 2 / Bánh trái: DIR2=RESET (0) khi tiến cơ học
-#define MOTOR1_SIGN   (+1)   // Motor 1 / Bánh phải: DIR=SET(1) khi tiến
-#define MOTOR2_SIGN   (-1)   // Motor 2 / Bánh trái: DIR=RESET(0) khi tiến
+#define MOTOR1_SIGN   (-1)   // Motor 1 / Bánh phải: DIR1=SET (1) khi tiến
+#define MOTOR2_SIGN   (+1)   // Motor 2 / Bánh trái: DIR2=SET (1) khi tiến (đổi từ -1 sang +1 để cùng quay tiến)
 
 // Dùng TIM1 Channel 1 (PE9) & Channel 2 (PE11)
 extern TIM_HandleTypeDef htim1;
@@ -39,8 +37,8 @@ static MotorDirSafeState s_motor_state[2] = {
     { .current_dir = 1, .pending_dir = 1, .deadtime_ticks = 0 }
 };
 
-#define REVERSAL_DEADTIME_TICKS   10 // 10 ticks * 5ms = 50ms chu kỳ bảo vệ khi đảo chiều (tăng từ 35ms→50ms cho Motor1 đảo chiều dứt khoát hơn)
-#define REVERSAL_FLIP_TICK        5  // Tại tick 5 (sau 25ms ngắt PWM) thì mới lật chân DIR (đủ thời gian xả dòng cuộn dây)
+#define REVERSAL_DEADTIME_TICKS   7  // 7 ticks * 5ms = 35ms chu kỳ bảo vệ khi đảo chiều
+#define REVERSAL_FLIP_TICK        3  // Tại tick 3 (sau 20ms ngắt PWM) thì mới lật chân DIR
 
 static void Motor_SetDir(MotorId id, uint8_t dir)
 {
@@ -65,18 +63,15 @@ void Motor_Init(void)
     HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
     __HAL_TIM_MOE_ENABLE(&htim1); // Kích hoạt Main Output Enable cho Timer nâng cao TIM1
 
-    // Khởi tạo chiều quay mặc định ban đầu đồng bộ với hướng tiến cơ học:
-    // Motor 1: DIR1=SET (1) khi tiến
-    // Motor 2: DIR2=RESET (0) khi tiến
     s_motor_state[MOTOR_1].current_dir = 1;
     s_motor_state[MOTOR_1].pending_dir = 1;
     s_motor_state[MOTOR_1].deadtime_ticks = 0;
     Motor_SetDir(MOTOR_1, 1);
 
-    s_motor_state[MOTOR_2].current_dir = 0;
-    s_motor_state[MOTOR_2].pending_dir = 0;
+    s_motor_state[MOTOR_2].current_dir = 1;
+    s_motor_state[MOTOR_2].pending_dir = 1;
     s_motor_state[MOTOR_2].deadtime_ticks = 0;
-    Motor_SetDir(MOTOR_2, 0);
+    Motor_SetDir(MOTOR_2, 1);
 
     // Mặc định: Motor dừng
     Motor_SetSpeed(MOTOR_1, 0);
@@ -108,14 +103,8 @@ void Motor_SetSpeed(MotorId id, int16_t speed)
     // 1. Khi lệnh dừng hoặc công suất quá nhỏ (< 5/1200): ngắt PWM ngay lập tức
     if (mag < 5) {
         __HAL_TIM_SET_COMPARE(&htim1, channel, 0);
-        // Khi PWM = 0 (dừng/không có dòng), cập nhật ngay chân DIR an toàn tuyệt đối, triệt tiêu kẹt deadtime
-        if (target_dir != s_motor_state[id].current_dir) {
-            s_motor_state[id].current_dir = target_dir;
-            s_motor_state[id].pending_dir = target_dir;
-            s_motor_state[id].deadtime_ticks = 0;
-            Motor_SetDir(id, target_dir);
-        } else if (s_motor_state[id].deadtime_ticks > 0) {
-            s_motor_state[id].deadtime_ticks = 0;
+        if (s_motor_state[id].deadtime_ticks > 0) {
+            s_motor_state[id].deadtime_ticks--;
         }
         return;
     }
@@ -139,7 +128,7 @@ void Motor_SetSpeed(MotorId id, int16_t speed)
 
         s_motor_state[id].deadtime_ticks--;
 
-        // Đến giữa dead-time (sau 25ms xả dòng cảm ứng cuộn dây): lật chân DIR
+        // Đến giữa dead-time (sau 20ms xả dòng cảm ứng cuộn dây): lật chân DIR
         if (s_motor_state[id].deadtime_ticks == REVERSAL_FLIP_TICK) {
             s_motor_state[id].current_dir = s_motor_state[id].pending_dir;
             Motor_SetDir(id, s_motor_state[id].current_dir);
@@ -163,11 +152,9 @@ void Motor_SetSpeed(MotorId id, int16_t speed)
 
 void Apply_Robot_Ramping(double *current_target, double raw_target)
 {
-    // Gia tốc giới hạn cho robot cao 1.6m, nặng 50kg:
-    // ACCEL_RATE = 0.18 m/s^2: tăng tốc siêu êm (0 -> 0.08 m/s mất ~0.44s)
-    // DECEL_RATE = 0.22 m/s^2: hãm phanh từ từ, triệt tiêu hoàn toàn cú giật chúi đầu do quán tính cao
-    const double ACCEL_RATE = 0.18;
-    const double DECEL_RATE = 0.22;
+    // Tách riêng gia tốc tăng tốc (accel) và giảm tốc (decel) để xe chạy và dừng êm ái
+    const double ACCEL_RATE = 1.2;  // 1.2 m/s^2: tăng tốc êm dịu, không vọt
+    const double DECEL_RATE = 1.8;  // 1.8 m/s^2: hãm phanh dứt khoát hơn (giảm thời gian đảo chiều còn ~0.68s)
 
     double max_step;
     if ((*current_target * raw_target < 0.0) ||

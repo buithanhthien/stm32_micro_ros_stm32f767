@@ -54,7 +54,7 @@ extern volatile uint32_t g_hall_channel_edges[2][3];
  * TIMEOUT TỐC ĐỘ (ms)
  * Nếu không có cạnh Hall trong thời gian này => Động cơ coi như đã dừng (tốc độ = 0)
  * ========================================================= */
-#define HALL_SPEED_TIMEOUT_MS   1250U
+#define HALL_SPEED_TIMEOUT_MS   150U
 
 /* =========================================================
  * ĐỊNH NGHĨA CHÂN GPIO CHO 6 TÍN HIỆU HALL

@@ -48,6 +48,10 @@ static volatile int32_t  g_hall_count[2] = {0, 0};
 
 /* Trạng thái Hall trước đó */
 static volatile uint8_t  g_hall_prev_state[2] = {0, 0};
+/* Trạng thái mới chỉ được chấp nhận sau khi ổn định đủ thời gian lọc. */
+static volatile uint8_t  g_hall_candidate_state[2] = {0, 0};
+static volatile uint8_t  g_hall_candidate_pending[2] = {0, 0};
+static volatile uint32_t g_hall_candidate_since_dwt[2] = {0, 0};
 
 /* Timestamp DWT chu kỳ lần có cạnh Hall gần nhất */
 static volatile uint32_t g_hall_last_edge_dwt[2] = {0, 0};
@@ -123,47 +127,34 @@ static inline uint8_t Hall_ReadState_Right(void)
     return (uint8_t)((hc << 2U) | (hb << 1U) | ha);
 }
 
-/* Ngưỡng lọc nhiễu dội cao tần (Anti-glitch filter):
- * Tốc độ xe tối đa 0.08 m/s (1 tick = 5.76mm -> chu kỳ cạnh > 72ms).
- * Ngay cả khi quay tự do 500 RPM, chu kỳ cạnh cũng > 1.3ms.
- * Mọi cạnh đến nhanh hơn 80 µs (17,280 CPU cycles @ 216MHz) là nhiễu xung điện từ (EMI) từ cuộn dây động cơ. */
-#define HALL_MIN_EDGE_CYCLES    17280U  /* 80 µs @ 216 MHz */
+/* Chỉ chấp nhận trạng thái Hall sau khi tín hiệu ổn định đủ lâu. */
+#define HALL_GLITCH_FILTER_US     500U
+#define HALL_GLITCH_FILTER_CYCLES ((SystemCoreClock / 1000000U) * HALL_GLITCH_FILTER_US)
 
 /**
  * @brief Xử lý cập nhật Hall trong ISR (cực nhanh, không float, không block)
  */
-static inline void Hall_Process_ISR(int id, uint8_t curr_state)
+static inline void Hall_CommitState_ISR(int id, uint8_t curr_state, uint32_t edge_time)
 {
-    uint32_t now = DWT->CYCCNT;
-    uint32_t dt = now - g_hall_last_edge_dwt[id];
-
-    /* 1. Lọc bỏ nhiễu dội cao tần (Glitch Filter):
-     * Nếu 2 ngắt đến cách nhau dưới 80 microsecond, bỏ qua xung nhiễu này để bảo vệ bộ đếm không bị tràn số. */
-    if (dt < HALL_MIN_EDGE_CYCLES && g_hall_last_edge_dwt[id] != 0U) {
-        return;
-    }
-
     uint8_t prev = g_hall_prev_state[id];
 
-    /* Bỏ qua nếu trạng thái không đổi (nhiễu rung cạnh) */
     if (curr_state == prev) {
         return;
     }
 
-    /* Trạng thái không hợp lệ của Hall 3 pha: 0 (000b) hoặc 7 (111b) => mất nguồn/tuột dây */
     if (curr_state == 0U || curr_state == 7U) {
         g_hall_err_count[id]++;
-        g_hall_last_edge_dwt[id] = now;
+        g_hall_last_edge_dwt[id] = edge_time;
         return;
     }
 
+    uint32_t dt = edge_time - g_hall_last_edge_dwt[id];
     int8_t step = hall_transition_table[prev][curr_state];
     if (step != 0) {
-        g_hall_last_edge_dwt[id] = now;
+        g_hall_last_edge_dwt[id] = edge_time;
         g_hall_edge_period_cycles[id] = dt;
         g_hall_last_dir[id] = step;
 
-        /* Cập nhật cửa sổ trượt chu kỳ cạnh Hall */
         g_hall_edge_window[id][g_hall_win_head[id]] = dt;
         g_hall_win_head[id] = (uint8_t)((g_hall_win_head[id] + 1U) % HALL_SPEED_WINDOW_SIZE);
         if (g_hall_win_count[id] < HALL_SPEED_WINDOW_SIZE) {
@@ -174,11 +165,61 @@ static inline void Hall_Process_ISR(int id, uint8_t curr_state)
         g_hall_count[id] += (int32_t)(step * dir_mult);
         g_hall_prev_state[id] = curr_state;
     } else {
-        /* Chuyển trạng thái bất thường (nhảy 2 bit do nhiễu hoặc mất cạnh) */
         g_hall_err_count[id]++;
-        g_hall_last_edge_dwt[id] = now;
-        /* Tự đồng bộ lại trạng thái hiện tại để bắt các cạnh kế tiếp */
+        g_hall_last_edge_dwt[id] = edge_time;
         g_hall_prev_state[id] = curr_state;
+    }
+}
+
+static inline void Hall_Process_ISR(int id, uint8_t curr_state)
+{
+    uint32_t now = DWT->CYCCNT;
+
+    if (g_hall_candidate_pending[id] != 0U) {
+        uint8_t candidate = g_hall_candidate_state[id];
+        uint32_t stable_cycles = now - g_hall_candidate_since_dwt[id];
+
+        if (curr_state == candidate) {
+            if (stable_cycles >= HALL_GLITCH_FILTER_CYCLES) {
+                Hall_CommitState_ISR(id, candidate, g_hall_candidate_since_dwt[id]);
+                g_hall_candidate_pending[id] = 0U;
+            }
+            return;
+        }
+
+        if (stable_cycles >= HALL_GLITCH_FILTER_CYCLES) {
+            Hall_CommitState_ISR(id, candidate, g_hall_candidate_since_dwt[id]);
+        }
+
+        if (curr_state == g_hall_prev_state[id]) {
+            g_hall_candidate_pending[id] = 0U;
+        } else {
+            g_hall_candidate_state[id] = curr_state;
+            g_hall_candidate_since_dwt[id] = now;
+            g_hall_candidate_pending[id] = 1U;
+        }
+        return;
+    }
+
+    if (curr_state != g_hall_prev_state[id]) {
+        g_hall_candidate_state[id] = curr_state;
+        g_hall_candidate_since_dwt[id] = now;
+        g_hall_candidate_pending[id] = 1U;
+    }
+}
+
+static inline void Hall_FlushPending_ISR(int id)
+{
+    if (g_hall_candidate_pending[id] == 0U) {
+        return;
+    }
+
+    uint8_t curr_state = (id == HALL_MOTOR_LEFT) ? Hall_ReadState_Left() : Hall_ReadState_Right();
+    uint32_t now = DWT->CYCCNT;
+    if (curr_state == g_hall_candidate_state[id] &&
+        (uint32_t)(now - g_hall_candidate_since_dwt[id]) >= HALL_GLITCH_FILTER_CYCLES) {
+        Hall_CommitState_ISR(id, g_hall_candidate_state[id], g_hall_candidate_since_dwt[id]);
+        g_hall_candidate_pending[id] = 0U;
     }
 }
 
@@ -241,6 +282,7 @@ int32_t Hall_GetCount(int id)
 
     uint32_t primask = __get_PRIMASK();
     __disable_irq();
+    Hall_FlushPending_ISR(id);
     int32_t count = g_hall_count[id];
     if (!primask) {
         __enable_irq();
@@ -257,12 +299,17 @@ void Hall_Reset(int id)
 
     uint32_t primask = __get_PRIMASK();
     __disable_irq();
+    uint32_t now = DWT->CYCCNT;
     g_hall_count[id]              = 0;
     g_hall_prev_count[id]         = 0;
     g_hall_speed_filtered[id]     = 0.0f;
     g_hall_edge_period_cycles[id] = 0;
-    g_hall_last_edge_dwt[id]      = DWT->CYCCNT;
+    g_hall_last_edge_dwt[id]      = now;
     g_hall_last_dir[id]           = 0;
+    g_hall_prev_state[id] = (id == HALL_MOTOR_LEFT) ? Hall_ReadState_Left() : Hall_ReadState_Right();
+    g_hall_candidate_state[id] = g_hall_prev_state[id];
+    g_hall_candidate_since_dwt[id] = now;
+    g_hall_candidate_pending[id] = 0U;
     g_hall_channel_edges[id][HALL_PHASE_A] = 0;
     g_hall_channel_edges[id][HALL_PHASE_B] = 0;
     g_hall_channel_edges[id][HALL_PHASE_C] = 0;
@@ -360,7 +407,6 @@ float Hall_GetSpeed_mps(int id, float dt)
     if (id != HALL_MOTOR_LEFT && id != HALL_MOTOR_RIGHT) {
         return 0.0f;
     }
-    (void)dt; /* Kept for API compatibility; low-rate Hall speed uses edge timestamps. */
 
     float ticks_per_wheel_rev = (id == HALL_MOTOR_LEFT) ? HALL_TICKS_PER_REV_L : HALL_TICKS_PER_REV_R;
     if (ticks_per_wheel_rev < 1.0f) {
@@ -371,6 +417,7 @@ float Hall_GetSpeed_mps(int id, float dt)
     /* Đọc dữ liệu an toàn nguyên tử */
     uint32_t primask = __get_PRIMASK();
     __disable_irq();
+    Hall_FlushPending_ISR(id);
     int32_t  cur_count  = g_hall_count[id];
     uint32_t last_edge  = g_hall_last_edge_dwt[id];
     int8_t   last_dir   = g_hall_last_dir[id];
@@ -383,7 +430,7 @@ float Hall_GetSpeed_mps(int id, float dt)
         __enable_irq();
     }
 
-    /* 1. Tính delta ticks giữa 2 lần gọi; chỉ dùng để xác nhận đã hết timeout. */
+    /* 1. Tính delta ticks giữa 2 lần gọi (chu kỳ dt = 5ms) */
     int32_t delta_ticks = cur_count - g_hall_prev_count[id];
     g_hall_prev_count[id] = cur_count;
 
@@ -418,8 +465,13 @@ float Hall_GetSpeed_mps(int id, float dt)
         int8_t dir_mult = (id == HALL_MOTOR_LEFT) ? (int8_t)MOTOR_LEFT_DIRECTION : (int8_t)MOTOR_RIGHT_DIRECTION;
         raw_speed = v_calc * (float)(last_dir * dir_mult);
     } else {
-        /* Không dùng delta_ticks / chu kỳ task 5 ms: một xung Hall đơn lẻ sẽ tạo gai vận tốc giả. */
-        raw_speed = g_hall_speed_filtered[id];
+        /* Fallback dự phòng trực tiếp từ delta_ticks: đảm bảo không bao giờ bị kẹt 0 khi bánh quay */
+        if (delta_ticks != 0 && dt > 1e-4f) {
+            float rev_per_sec = ((float)delta_ticks / dt) / ticks_per_wheel_rev;
+            raw_speed = rev_per_sec * WHEEL_CIRC_M;
+        } else {
+            raw_speed = g_hall_speed_filtered[id];
+        }
     }
 
     /* 3. Bộ lọc thông thấp bậc 1 (alpha = 0.15) làm mượt hoàn hảo tín hiệu cho PID, triệt tiêu gai xung Hall */

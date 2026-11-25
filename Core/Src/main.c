@@ -116,9 +116,6 @@ int main(void)
   MX_SPI2_Init();
   /* USER CODE BEGIN 2 */
   /* Khởi tạo hệ thống Hall Sensor, Encoder wrapper và Motor */
-  Hall_Init();
-  Hall_Reset(HALL_MOTOR_LEFT);
-  Hall_Reset(HALL_MOTOR_RIGHT);
   Encoder_Init();
   EncoderSpeed_Init();
   Motor_Init();
