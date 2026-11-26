@@ -48,6 +48,10 @@ static volatile int32_t  g_hall_count[2] = {0, 0};
 
 /* Trạng thái Hall trước đó */
 static volatile uint8_t  g_hall_prev_state[2] = {0, 0};
+/* Trạng thái mới chỉ được chấp nhận sau khi ổn định đủ thời gian lọc. */
+static volatile uint8_t  g_hall_candidate_state[2] = {0, 0};
+static volatile uint8_t  g_hall_candidate_pending[2] = {0, 0};
+static volatile uint32_t g_hall_candidate_since_dwt[2] = {0, 0};
 
 /* Timestamp DWT chu kỳ lần có cạnh Hall gần nhất */
 static volatile uint32_t g_hall_last_edge_dwt[2] = {0, 0};
@@ -123,31 +127,34 @@ static inline uint8_t Hall_ReadState_Right(void)
     return (uint8_t)((hc << 2U) | (hb << 1U) | ha);
 }
 
+/* Chỉ chấp nhận trạng thái Hall sau khi tín hiệu ổn định đủ lâu. */
+#define HALL_GLITCH_FILTER_US     500U
+#define HALL_GLITCH_FILTER_CYCLES ((SystemCoreClock / 1000000U) * HALL_GLITCH_FILTER_US)
+
 /**
  * @brief Xử lý cập nhật Hall trong ISR (cực nhanh, không float, không block)
  */
-static inline void Hall_Process_ISR(int id, uint8_t curr_state)
+static inline void Hall_CommitState_ISR(int id, uint8_t curr_state, uint32_t edge_time)
 {
     uint8_t prev = g_hall_prev_state[id];
 
-    /* Bỏ qua nếu trạng thái không đổi (nhiễu rung cạnh) hoặc không hợp lệ */
     if (curr_state == prev) {
         return;
     }
+
     if (curr_state == 0U || curr_state == 7U) {
         g_hall_err_count[id]++;
+        g_hall_last_edge_dwt[id] = edge_time;
         return;
     }
 
+    uint32_t dt = edge_time - g_hall_last_edge_dwt[id];
     int8_t step = hall_transition_table[prev][curr_state];
     if (step != 0) {
-        uint32_t now = DWT->CYCCNT;
-        uint32_t dt = now - g_hall_last_edge_dwt[id];
-        g_hall_last_edge_dwt[id] = now;
+        g_hall_last_edge_dwt[id] = edge_time;
         g_hall_edge_period_cycles[id] = dt;
         g_hall_last_dir[id] = step;
 
-        /* Cập nhật cửa sổ trượt chu kỳ cạnh Hall */
         g_hall_edge_window[id][g_hall_win_head[id]] = dt;
         g_hall_win_head[id] = (uint8_t)((g_hall_win_head[id] + 1U) % HALL_SPEED_WINDOW_SIZE);
         if (g_hall_win_count[id] < HALL_SPEED_WINDOW_SIZE) {
@@ -158,10 +165,61 @@ static inline void Hall_Process_ISR(int id, uint8_t curr_state)
         g_hall_count[id] += (int32_t)(step * dir_mult);
         g_hall_prev_state[id] = curr_state;
     } else {
-        /* Chuyển trạng thái bất thường (nhảy 2 bit do nhiễu hoặc mất cạnh) */
         g_hall_err_count[id]++;
-        /* Tự đồng bộ lại trạng thái hiện tại để bắt các cạnh kế tiếp */
+        g_hall_last_edge_dwt[id] = edge_time;
         g_hall_prev_state[id] = curr_state;
+    }
+}
+
+static inline void Hall_Process_ISR(int id, uint8_t curr_state)
+{
+    uint32_t now = DWT->CYCCNT;
+
+    if (g_hall_candidate_pending[id] != 0U) {
+        uint8_t candidate = g_hall_candidate_state[id];
+        uint32_t stable_cycles = now - g_hall_candidate_since_dwt[id];
+
+        if (curr_state == candidate) {
+            if (stable_cycles >= HALL_GLITCH_FILTER_CYCLES) {
+                Hall_CommitState_ISR(id, candidate, g_hall_candidate_since_dwt[id]);
+                g_hall_candidate_pending[id] = 0U;
+            }
+            return;
+        }
+
+        if (stable_cycles >= HALL_GLITCH_FILTER_CYCLES) {
+            Hall_CommitState_ISR(id, candidate, g_hall_candidate_since_dwt[id]);
+        }
+
+        if (curr_state == g_hall_prev_state[id]) {
+            g_hall_candidate_pending[id] = 0U;
+        } else {
+            g_hall_candidate_state[id] = curr_state;
+            g_hall_candidate_since_dwt[id] = now;
+            g_hall_candidate_pending[id] = 1U;
+        }
+        return;
+    }
+
+    if (curr_state != g_hall_prev_state[id]) {
+        g_hall_candidate_state[id] = curr_state;
+        g_hall_candidate_since_dwt[id] = now;
+        g_hall_candidate_pending[id] = 1U;
+    }
+}
+
+static inline void Hall_FlushPending_ISR(int id)
+{
+    if (g_hall_candidate_pending[id] == 0U) {
+        return;
+    }
+
+    uint8_t curr_state = (id == HALL_MOTOR_LEFT) ? Hall_ReadState_Left() : Hall_ReadState_Right();
+    uint32_t now = DWT->CYCCNT;
+    if (curr_state == g_hall_candidate_state[id] &&
+        (uint32_t)(now - g_hall_candidate_since_dwt[id]) >= HALL_GLITCH_FILTER_CYCLES) {
+        Hall_CommitState_ISR(id, g_hall_candidate_state[id], g_hall_candidate_since_dwt[id]);
+        g_hall_candidate_pending[id] = 0U;
     }
 }
 
@@ -224,6 +282,7 @@ int32_t Hall_GetCount(int id)
 
     uint32_t primask = __get_PRIMASK();
     __disable_irq();
+    Hall_FlushPending_ISR(id);
     int32_t count = g_hall_count[id];
     if (!primask) {
         __enable_irq();
@@ -240,12 +299,17 @@ void Hall_Reset(int id)
 
     uint32_t primask = __get_PRIMASK();
     __disable_irq();
+    uint32_t now = DWT->CYCCNT;
     g_hall_count[id]              = 0;
     g_hall_prev_count[id]         = 0;
     g_hall_speed_filtered[id]     = 0.0f;
     g_hall_edge_period_cycles[id] = 0;
-    g_hall_last_edge_dwt[id]      = DWT->CYCCNT;
+    g_hall_last_edge_dwt[id]      = now;
     g_hall_last_dir[id]           = 0;
+    g_hall_prev_state[id] = (id == HALL_MOTOR_LEFT) ? Hall_ReadState_Left() : Hall_ReadState_Right();
+    g_hall_candidate_state[id] = g_hall_prev_state[id];
+    g_hall_candidate_since_dwt[id] = now;
+    g_hall_candidate_pending[id] = 0U;
     g_hall_channel_edges[id][HALL_PHASE_A] = 0;
     g_hall_channel_edges[id][HALL_PHASE_B] = 0;
     g_hall_channel_edges[id][HALL_PHASE_C] = 0;
@@ -353,6 +417,7 @@ float Hall_GetSpeed_mps(int id, float dt)
     /* Đọc dữ liệu an toàn nguyên tử */
     uint32_t primask = __get_PRIMASK();
     __disable_irq();
+    Hall_FlushPending_ISR(id);
     int32_t  cur_count  = g_hall_count[id];
     uint32_t last_edge  = g_hall_last_edge_dwt[id];
     int8_t   last_dir   = g_hall_last_dir[id];

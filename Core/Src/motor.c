@@ -19,8 +19,8 @@
 #define MOTOR2_DIR_Pin         GPIO_PIN_13   // PE13
 
 // Hướng quay thực tế của 2 động cơ (để 2 bánh cùng quay TIẾN khi SpeedPIDOut > 0):
-#define MOTOR1_SIGN   (+1)   // Motor 1 / Bánh phải: DIR1=SET (1) khi tiến
-#define MOTOR2_SIGN   (-1)   // Motor 2 / Bánh trái: DIR2=SET (1) khi tiến (đổi từ -1 sang +1 để cùng quay tiến)
+#define MOTOR1_SIGN   (-1)   // Motor 1 / Bánh phải: DIR1=SET (1) khi tiến
+#define MOTOR2_SIGN   (+1)   // Motor 2 / Bánh trái: DIR2=SET (1) khi tiến (đổi từ -1 sang +1 để cùng quay tiến)
 
 // Dùng TIM1 Channel 1 (PE9) & Channel 2 (PE11)
 extern TIM_HandleTypeDef htim1;

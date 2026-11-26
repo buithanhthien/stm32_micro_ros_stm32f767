@@ -6,8 +6,8 @@
  */
 #include "robot_params.h"
 
-int32_t g_encCount1 = 0;
-int32_t g_encCount2 = 0;
+volatile int32_t g_encCount1 = 0;
+volatile int32_t g_encCount2 = 0;
 float g_speed1_mps = 0.0f;
 float g_speed2_mps = 0.0f;
 
@@ -19,8 +19,8 @@ double CurPos2 = 0, CurSpeed2 = 0, PosPIDOut2 = 0, SpeedPIDOut2 = 0, DesiredPos2
 
 double Spd1_cmdfromROS = 0, Spd2_cmdfromROS = 0;
 
-double Kp1 = 120, Ki1 = 15, Kd1 = 0;
-double Kp2 = 120, Ki2 = 15, Kd2 = 0;
+double Kp1 = 200, Ki1 = 50, Kd1 = 0;
+double Kp2 = 200, Ki2 = 50, Kd2 = 0;
 
 double Kp_fromLCD1=2500, Ki_fromLCD1=350, Kd_fromLCD1=0;
 double Kp_fromLCD2=2500, Ki_fromLCD2=350, Kd_fromLCD2=0;

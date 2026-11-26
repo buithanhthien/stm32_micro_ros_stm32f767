@@ -166,6 +166,7 @@ volatile double SetSpeed2 = 0.0f;
 static float g_theta = 0.0f;
 static float g_theta_ref = 0.0f;
 static float g_e_theta_prev = 0.0f;
+static float g_heading_v_corr = 0.0f;
 static uint8_t g_heading_hold_en = 0;
 static uint32_t g_heading_div_ctr = 0;
 //////////////////////////////////////////////////
@@ -1277,8 +1278,19 @@ void EncoderTask(void *argument)
 	g_encCount1 = Encoder_GetCount(ENCODER_1);
     g_encCount2 = Encoder_GetCount(ENCODER_2);
 
-    g_speed1_mps = Encoder_GetSpeed_mps(ENCODER_1,DT_TIME);
-    g_speed2_mps = Encoder_GetSpeed_mps(ENCODER_2,DT_TIME);
+    float raw_v1 = Encoder_GetSpeed_mps(ENCODER_1, DT_TIME);
+    float raw_v2 = Encoder_GetSpeed_mps(ENCODER_2, DT_TIME);
+
+    // Kẹp ngưỡng vật lý an toàn chống gai xung Hall bất thường (|v| <= 1.0 m/s)
+    raw_v1 = clampf(raw_v1, -1.0f, 1.0f);
+    raw_v2 = clampf(raw_v2, -1.0f, 1.0f);
+
+    // Zero-snap: tránh float noise khi xe đứng yên
+    if (fabsf(raw_v1) < 0.003f) raw_v1 = 0.0f;
+    if (fabsf(raw_v2) < 0.003f) raw_v2 = 0.0f;
+
+    g_speed1_mps = raw_v1;
+    g_speed2_mps = raw_v2;
 
     taskENTER_CRITICAL();
     CurSpeed1 = (double)g_speed1_mps;
@@ -1342,9 +1354,7 @@ void MotorControlTask(void *argument)
 				float v_avg_cmd = 0.5f * (vL_ref_cmd + vR_ref_cmd);
 				float dv_cmd    = (vR_ref_cmd - vL_ref_cmd);
 
-				// Chỉ kích hoạt Heading Hold trong chế độ tự hành autonomous_MODE (tránh can thiệp làm lệch 2 bánh khi lái tay bằng PS2)
 				uint8_t want_heading_hold =
-				    (autonomous_MODE != 0) &&
 				    (fabsf(dv_cmd) < EPS_TURN_MPS) &&
 				    (fabsf(v_avg_cmd) > EPS_MOVE_MPS);
 
@@ -1356,9 +1366,7 @@ void MotorControlTask(void *argument)
 
 				g_heading_hold_en = want_heading_hold;
 
-				//Heading PD outer loop (run every 20 ms), then modify DesiredSpeed1/2
-				float omega_corr = 0.0f;
-
+				// Heading PD chạy mỗi 20 ms; giữ correction trong các vòng 5 ms còn lại.
 				if (g_heading_hold_en) {
 
 				    // Run heading controller at slower rate
@@ -1369,24 +1377,20 @@ void MotorControlTask(void *argument)
 				        float e_theta = wrap_pi(g_theta_ref - g_theta);
 				        float de      = (e_theta - g_e_theta_prev) / HEADING_DT;
 
-				        omega_corr = HEADING_KP * e_theta + HEADING_KD * de;
+				        float omega_corr = HEADING_KP * e_theta + HEADING_KD * de;
 				        omega_corr = clampf(omega_corr, -OMEGA_CORR_MAX, OMEGA_CORR_MAX);
 
 				        g_e_theta_prev = e_theta;
 
 				        // Convert omega correction -> wheel linear speed offsets
 				        // vR = v + omega*L/2 ; vL = v - omega*L/2
-				        float v_corr = omega_corr * (WHEEL_BASE_M * 0.5f);
-
-				        // Keep same average command, just bias left/right
-				        float v_avg = v_avg_cmd;
-
-				        vR_ref_cmd = v_avg + v_corr;
-				        vL_ref_cmd = v_avg - v_corr;
+				        g_heading_v_corr = omega_corr * (WHEEL_BASE_M * 0.5f);
 				    }
-				    // else: keep last computed vL_ref_cmd/vR_ref_cmd from previous heading tick
+				    vR_ref_cmd = clampf(v_avg_cmd + g_heading_v_corr, -V_MAX, V_MAX);
+				    vL_ref_cmd = clampf(v_avg_cmd - g_heading_v_corr, -V_MAX, V_MAX);
 				} else {
 				    g_heading_div_ctr = 0;
+				    g_heading_v_corr = 0.0f;
 				}
 
 				//Here apply kick start if needed
@@ -1972,8 +1976,8 @@ void StartTeleopTask(void *argument)
                         float rx_n = (float)rx / 127.0f;      // -1..1
                         float ry_n = (float)ry / 127.0f;      // -1..1
 
-                        v_cmd = (-ry_n) * PS2_V_MAX;
-                        w_cmd = ( rx_n) * W_MAX;
+                        v_cmd = (-ry_n) * V_MAX;
+                        w_cmd = (-rx_n) * W_MAX;
 
                     } else {
                         bool up    = is_pressed(st.buttons, PSB_UP);
@@ -1986,9 +1990,9 @@ void StartTeleopTask(void *argument)
                         } else if (down && !up && !left && !right) {
                             v_cmd = -V_STEP;  w_cmd = 0.0f;
                         } else if (left && !up && !down && !right) {
-                            v_cmd = 0.0f;     w_cmd = -W_STEP;
-                        } else if (right && !up && !down && !left) {
                             v_cmd = 0.0f;     w_cmd = +W_STEP;
+                        } else if (right && !up && !down && !left) {
+                            v_cmd = 0.0f;     w_cmd = -W_STEP;
                         } else {
                             v_cmd = 0.0f;     w_cmd = 0.0f;
                         }

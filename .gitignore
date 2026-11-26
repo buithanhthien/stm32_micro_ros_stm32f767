@@ -12,3 +12,10 @@ build-linux/
 # STM32CubeIDE build artifacts
 Debug/
 Release/
+
+# Telemetry data and temporary diagnostic logs
+*.csv
+*.png
+*.bin
+scratch_*.py
+parse_new.py

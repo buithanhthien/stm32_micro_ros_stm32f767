@@ -63,7 +63,11 @@
  * ==================================================================== */
 #define WHEEL_DIAMETER_M   0.1651f     // Đường kính bánh xe (10 cm)
 #define WHEEL_CIRC_M       (3.1415926f * WHEEL_DIAMETER_M)
-#define WHEEL_BASE_M       0.525f    // Khoảng cách 2 bánh xe (m)
+#define WHEEL_BASE_M       0.545f    // Khoảng cách 2 bánh xe (m)
+
+/* Hệ số hiệu chuẩn quãng đường riêng mỗi bánh sau khi chạy thử trên mặt phẳng. */
+#define ODOM_LEFT_SCALE    1.0f
+#define ODOM_RIGHT_SCALE   1.0f
 
 // Chu kỳ lấy mẫu cho các task (ms)
 #define ODOMETRY_PERIOD_MS     5
@@ -73,20 +77,19 @@
 #define DT_TIME                0.005f
 
 // Giới hạn tốc độ và gia tốc
-#define MAXSPEED           1.00f
-#define V_MAX              1.00f     // Tốc độ dài cực đại (m/s)
-#define PS2_V_MAX          0.20f     // Giới hạn vận tốc tịnh tiến tay cầm (m/s)
-#define V_STEP             PS2_V_MAX // Vận tốc tiến/lùi D-pad
+#define MAXSPEED           0.2f
+#define V_MAX              0.2f     // Tốc độ dài cực đại (m/s)
+#define V_STEP             0.2f   // Bước tốc độ D-pad
 
 // Hệ số bù trước Feedforward vận tốc: cung cấp công suất nền cơ bản (PWM / (m/s))
 // 250.0f cho ~125 PWM tại 0.5 m/s, êm dịu, không gây vọt lố hay sập nguồn
-#define MOTOR_FEEDFORWARD_KV   250.0f
+#define MOTOR_FEEDFORWARD_KV  0.0f
 
 #define MAXACC             2.5f
 
 // Hằng số bộ điều khiển PS2
-#define W_MAX              2.00f     // Tốc độ góc cực đại cần analog (rad/s)
-#define W_STEP             W_MAX/4.0f     // Vận tốc xoay D-pad (rad/s)
+#define W_MAX              2.00f     // Tốc độ góc cực đại (rad/s)
+#define W_STEP             0.8f     // Bước tốc độ xoay D-pad
 
 #define PS2_TIMEOUT_MS     500
 #define STICK_DEADBAND     12        // Vùng chết cần analog (0..255)
@@ -96,8 +99,10 @@
 #define EPS_MOVE_MPS       0.05f   // if avg speed below this => don't bother holding heading
 
 // Hệ số bộ điều khiển hướng (Heading controller gains)
-#define HEADING_KP         2.0f
-#define HEADING_KD         0.1f
+#define HEADING_KP        #define WHEEL_BASE_M       0.545f    // Khoảng cách 2 bánh xe (m)
+
+/* Hệ số hiệu chuẩn 2.0f //2
+#define HEADING_KD         0.1f // 0.1
 
 // Chu kỳ vòng lặp hướng
 #define HEADING_DT         0.02f   // 20 ms (50 Hz)
@@ -127,8 +132,8 @@ extern uint8_t pid_update_pending;
 extern int32_t PID_sampletime;
 
 // Các biến encoder / hall toàn cục
-extern int32_t g_encCount1;
-extern int32_t g_encCount2;
+extern volatile int32_t g_encCount1;
+extern volatile int32_t g_encCount2;
 extern float g_speed1_mps;
 extern float g_speed2_mps;
 extern float g_revCount1;

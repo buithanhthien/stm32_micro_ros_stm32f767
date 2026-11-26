@@ -60,16 +60,23 @@ void Odometry_Update(float dt)
     prevR = nowR;
 
     // Khoảng cách mỗi bánh xe đi được trong chu kỳ này (mét)
-    float dL = LEFT_SIGN  * ((float)dTicksL / (float)HALL_TICKS_PER_REV_L) * WHEEL_CIRC_M;
-    float dR = RIGHT_SIGN * ((float)dTicksR / (float)HALL_TICKS_PER_REV_R) * WHEEL_CIRC_M;
+    float dL = LEFT_SIGN * ODOM_LEFT_SCALE *
+               ((float)dTicksL / HALL_TICKS_PER_REV_L) * WHEEL_CIRC_M;
+    float dR = RIGHT_SIGN * ODOM_RIGHT_SCALE *
+               ((float)dTicksR / HALL_TICKS_PER_REV_R) * WHEEL_CIRC_M;
 
     float dS  = 0.5f * (dL + dR);
     float dTh = (dR - dL) / WHEEL_BASE_M;
 
-    float mid = odom_theta + 0.5f * dTh;
-
-    odom_x     += dS * cosf(mid);
-    odom_y     += dS * sinf(mid);
+    float theta0 = odom_theta;
+    if (fabsf(dTh) < 1e-6f) {
+        odom_x += dS * cosf(theta0);
+        odom_y += dS * sinf(theta0);
+    } else {
+        float radius = dS / dTh;
+        odom_x += radius * (sinf(theta0 + dTh) - sinf(theta0));
+        odom_y -= radius * (cosf(theta0 + dTh) - cosf(theta0));
+    }
     odom_theta  = wrapAngle(odom_theta + dTh);
 
     // -----------------------------
