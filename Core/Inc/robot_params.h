@@ -75,7 +75,8 @@
 // Giới hạn tốc độ và gia tốc
 #define MAXSPEED           1.00f
 #define V_MAX              1.00f     // Tốc độ dài cực đại (m/s)
-#define V_STEP             0.50f     // Bước tốc độ D-pad
+#define PS2_V_MAX          0.20f     // Giới hạn vận tốc tịnh tiến tay cầm (m/s)
+#define V_STEP             PS2_V_MAX // Vận tốc tiến/lùi D-pad
 
 // Hệ số bù trước Feedforward vận tốc: cung cấp công suất nền cơ bản (PWM / (m/s))
 // 250.0f cho ~125 PWM tại 0.5 m/s, êm dịu, không gây vọt lố hay sập nguồn
@@ -84,8 +85,8 @@
 #define MAXACC             2.5f
 
 // Hằng số bộ điều khiển PS2
-#define W_MAX              2.00f     // Tốc độ góc cực đại (rad/s)
-#define W_STEP             0.50f     // Bước tốc độ xoay D-pad
+#define W_MAX              0.50f     // Tốc độ góc cực đại tay cầm (rad/s)
+#define W_STEP             W_MAX     // Vận tốc xoay D-pad
 
 #define PS2_TIMEOUT_MS     500
 #define STICK_DEADBAND     12        // Vùng chết cần analog (0..255)

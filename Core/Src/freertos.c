@@ -1972,7 +1972,7 @@ void StartTeleopTask(void *argument)
                         float rx_n = (float)rx / 127.0f;      // -1..1
                         float ry_n = (float)ry / 127.0f;      // -1..1
 
-                        v_cmd = (-ry_n) * V_MAX;
+                        v_cmd = (-ry_n) * PS2_V_MAX;
                         w_cmd = ( rx_n) * W_MAX;
 
                     } else {
@@ -2002,6 +2002,10 @@ void StartTeleopTask(void *argument)
             v_cmd = 0.0f;
             w_cmd = 0.0f;
         }
+
+        // Bound both analog and D-pad commands; raw stick -128/127 exceeds 1.
+        v_cmd = clampf(v_cmd, -PS2_V_MAX, +PS2_V_MAX);
+        w_cmd = clampf(w_cmd, -W_MAX, +W_MAX);
 
         // ---- convert cmd_vel to wheel linear speeds (manual path only) ----
         float v_r = v_cmd + (w_cmd * WHEEL_BASE_M * 0.5f);

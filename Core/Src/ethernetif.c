@@ -20,6 +20,7 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include <ethernetif.h>
+#include "ethernet_diagnostics.h"
 #include "main.h"
 #include "lwip/opt.h"
 #include "lwip/timeouts.h"
@@ -54,6 +55,13 @@
 #define ETH_TX_BUFFER_MAX             ((ETH_TX_DESC_CNT) * 2U)
 
 /* USER CODE BEGIN 1 */
+volatile EthernetDiagnostics g_eth_diag = {
+  .hal_init_status = UINT32_MAX,
+  .hal_start_status = UINT32_MAX,
+  .phy_init_status = UINT32_MAX,
+  .phy_link_state = -1,
+  .tx_last_status = UINT32_MAX
+};
 volatile uintptr_t addr_rx_desc = 0;
 volatile uintptr_t addr_tx_desc = 0;
 volatile uintptr_t addr_rx_buf  = 0;
@@ -189,6 +197,7 @@ void pbuf_free_custom(struct pbuf *p);
   */
 void HAL_ETH_RxCpltCallback(ETH_HandleTypeDef *handlerEth)
 {
+  g_eth_diag.rx_irq_count++;
   osSemaphoreRelease(RxPktSemaphore);
 }
 /**
@@ -198,8 +207,9 @@ void HAL_ETH_RxCpltCallback(ETH_HandleTypeDef *handlerEth)
   */
 void HAL_ETH_TxCpltCallback(ETH_HandleTypeDef *handlerEth)
 {
+  g_eth_diag.tx_irq_count++;
   osSemaphoreRelease(TxPktSemaphore);
-  HAL_ETH_ReleaseTxPacket(handlerEth);
+  /* Reclaim pbufs in the submitting task, never in IRQ context. */
 }
 /**
   * @brief  Ethernet DMA transfer error callback
@@ -208,6 +218,9 @@ void HAL_ETH_TxCpltCallback(ETH_HandleTypeDef *handlerEth)
   */
 void HAL_ETH_ErrorCallback(ETH_HandleTypeDef *handlerEth)
 {
+  g_eth_diag.dma_error_count++;
+  g_eth_diag.last_dma_error = HAL_ETH_GetDMAError(handlerEth);
+  g_eth_diag.last_hal_error = HAL_ETH_GetError(handlerEth);
   if((HAL_ETH_GetDMAError(handlerEth) & ETH_DMASR_RBUS) == ETH_DMASR_RBUS)
   {
      osSemaphoreRelease(RxPktSemaphore);
@@ -228,6 +241,27 @@ void HAL_ETH_ErrorCallback(ETH_HandleTypeDef *handlerEth)
  * @param netif the already initialized lwip network interface structure
  *        for this ethernetif
  */
+/* Preserve HAL results while recording all initializations and starts. */
+static HAL_StatusTypeDef eth_init_diagnostic(void)
+{
+  HAL_StatusTypeDef status = HAL_ETH_Init(&heth);
+  g_eth_diag.hal_init_status = status;
+  if (status == HAL_OK)
+  {
+    /* MAC reset clears CR. Restore it on initial boot and every reinit,
+     * before LAN8742_GetLinkState performs another MDIO transaction. */
+    HAL_ETH_SetMDIOClockRange(&heth);
+  }
+  return status;
+}
+
+static HAL_StatusTypeDef eth_start_diagnostic(void)
+{
+  HAL_StatusTypeDef status = HAL_ETH_Start_IT(&heth);
+  g_eth_diag.hal_start_status = status;
+  return status;
+}
+
 static void low_level_init(struct netif *netif)
 {
   addr_rx_desc = (uintptr_t)DMARxDscrTab;
@@ -253,7 +287,7 @@ static void low_level_init(struct netif *netif)
 
   /* USER CODE END MACADDRESS */
 
-  hal_eth_init_status = HAL_ETH_Init(&heth);
+  hal_eth_init_status = eth_init_diagnostic();
 
   memset(&TxConfig, 0 , sizeof(ETH_TxPacketConfig));
   TxConfig.Attributes = ETH_TX_PACKETS_FEATURES_CRCPAD;
@@ -311,7 +345,9 @@ static void low_level_init(struct netif *netif)
   LAN8742_RegisterBusIO(&LAN8742, &LAN8742_IOCtx);
 
   /* Initialize the LAN8742 ETH PHY */
-  if(LAN8742_Init(&LAN8742) != LAN8742_STATUS_OK)
+  int32_t phy_init_status = LAN8742_Init(&LAN8742);
+  g_eth_diag.phy_init_status = (uint32_t)phy_init_status;
+  if(phy_init_status != LAN8742_STATUS_OK)
   {
     netif_set_link_down(netif);
     netif_set_down(netif);
@@ -368,8 +404,8 @@ static void low_level_init(struct netif *netif)
     HAL_ETH_SetMACFilterConfig(&heth, &MACFilterConf);
 
     //volatile HAL_StatusTypeDef g_eth_start_status;
-    //g_eth_start_status = HAL_ETH_Start_IT(&heth);
-    HAL_ETH_Start_IT(&heth);
+    //g_eth_start_status = eth_start_diagnostic();
+    eth_start_diagnostic();
     netif_set_up(netif);
     netif_set_link_up(netif);
 
@@ -444,32 +480,57 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
   TxConfig.TxBuffer = Txbuffer;
   TxConfig.pData = p;
 
+  /* lwIP serializes linkoutput in its core thread. Reap any completion
+   * retained after an earlier timeout before submitting the next packet. */
+  HAL_ETH_ReleaseTxPacket(&heth);
+  g_eth_diag.tx_requests++;
   pbuf_ref(p);
+  uint32_t tx_start_ms = HAL_GetTick();
 
   do
   {
-    if(HAL_ETH_Transmit_IT(&heth, &TxConfig) == HAL_OK)
+    HAL_StatusTypeDef tx_status = HAL_ETH_Transmit_IT(&heth, &TxConfig);
+    g_eth_diag.tx_last_status = tx_status;
+    if (tx_status == HAL_OK)
     {
       errval = ERR_OK;
+      /* Keep all pbuf/heap and HAL reclaim operations in task context.
+       * An IRQ may arrive before this wait; the binary semaphore retains it.
+       * A stale notification is harmless: BuffersInUse is the predicate. */
+      while (heth.TxDescList.BuffersInUse != 0U)
+      {
+        HAL_ETH_ReleaseTxPacket(&heth);
+        if (heth.TxDescList.BuffersInUse == 0U)
+          break;
+        uint32_t elapsed = HAL_GetTick() - tx_start_ms;
+        if (elapsed >= ETHIF_TX_TIMEOUT)
+        {
+          g_eth_diag.tx_timeout_count++;
+          /* HAL owns the submitted reference until DMA completes. */
+          errval = ERR_IF;
+          break;
+        }
+        osSemaphoreAcquire(TxPktSemaphore, ETHIF_TX_TIMEOUT - elapsed);
+      }
+      break;
+    }
+
+    g_eth_diag.tx_submit_errors++;
+    g_eth_diag.last_hal_error = HAL_ETH_GetError(&heth);
+    if ((HAL_ETH_GetError(&heth) & HAL_ETH_ERROR_BUSY) &&
+        ((HAL_GetTick() - tx_start_ms) < ETHIF_TX_TIMEOUT))
+    {
+      HAL_ETH_ReleaseTxPacket(&heth);
+      osSemaphoreAcquire(TxPktSemaphore, 1U);
+      errval = ERR_BUF;
     }
     else
     {
-
-      if(HAL_ETH_GetError(&heth) & HAL_ETH_ERROR_BUSY)
-      {
-        /* Wait for descriptors to become available */
-        osSemaphoreAcquire(  TxPktSemaphore, ETHIF_TX_TIMEOUT);
-        HAL_ETH_ReleaseTxPacket(&heth);
-        errval = ERR_BUF;
-      }
-      else
-      {
-        /* Other error */
-        pbuf_free(p);
-        errval =  ERR_IF;
-      }
+      /* Submission failed: HAL never took ownership of this reference. */
+      pbuf_free(p);
+      errval = ERR_IF;
     }
-  }while(errval == ERR_BUF);
+  } while (errval == ERR_BUF);
 
   return errval;
 }
@@ -517,8 +578,10 @@ void ethernetif_input(void* argument)
         p = low_level_input( netif );
         if (p != NULL)
         {
+          g_eth_diag.rx_frames++;
           if (netif->input( p, netif) != ERR_OK )
           {
+            g_eth_diag.rx_input_errors++;
             pbuf_free(p);
           }
         }
@@ -851,6 +914,18 @@ void ethernet_link_thread(void* argument)
         linkchanged = 0U;
 
         PHYLinkState = LAN8742_GetLinkState(&LAN8742);
+        /* Passive snapshot only: no register writes or recovery requests. */
+        g_eth_diag.phy_link_state = PHYLinkState;
+        g_eth_diag.netif_flags = netif->flags;
+        g_eth_diag.ipv4_address = netif_ip4_addr(netif)->addr;
+        g_eth_diag.dma_status = heth.Instance->DMASR;
+        uint32_t ready = 0U;
+        for (uint32_t i = 0U; i < ETH_RX_DESC_CNT; i++)
+        {
+            if (DMARxDscrTab[i].DESC2 != 0U)
+                ready++;
+        }
+        g_eth_diag.rx_desc_ready = ready;
 
         /* =====================================================
          * 1. PHY LINK DOWN
@@ -932,7 +1007,7 @@ void ethernet_link_thread(void* argument)
                     	continue;
                     }
 
-                    if (HAL_ETH_Init(&heth) != HAL_OK)
+                    if (eth_init_diagnostic() != HAL_OK)
                     {
                     	netif_set_down(netif);
                     	netif_set_link_down(netif);
@@ -971,7 +1046,7 @@ void ethernet_link_thread(void* argument)
                     MACFilterConf.BroadcastFilter = DISABLE;
                     HAL_ETH_SetMACFilterConfig(&heth, &MACFilterConf);
 
-                    if (HAL_ETH_Start_IT(&heth) != HAL_OK)
+                    if (eth_start_diagnostic() != HAL_OK)
                     {
                     	HAL_ETH_Stop_IT(&heth);
 
@@ -1021,7 +1096,7 @@ void ethernet_link_thread(void* argument)
             	continue;
             }
 
-            if (HAL_ETH_Init(&heth) != HAL_OK)
+            if (eth_init_diagnostic() != HAL_OK)
             {
             	netif_set_down(netif);
             	netif_set_link_down(netif);
@@ -1088,7 +1163,7 @@ void ethernet_link_thread(void* argument)
             MACFilterConf2.BroadcastFilter = DISABLE;
             HAL_ETH_SetMACFilterConfig(&heth, &MACFilterConf2);
 
-            if (HAL_ETH_Start_IT(&heth) != HAL_OK)
+            if (eth_start_diagnostic() != HAL_OK)
             {
             	HAL_ETH_Stop_IT(&heth);
 
@@ -1140,6 +1215,7 @@ void HAL_ETH_RxAllocateCallback(uint8_t **buff)
   }
   else
   {
+    g_eth_diag.rx_alloc_fail_count++;
     RxAllocStatus = RX_ALLOC_ERROR;
     *buff = NULL;
   }
@@ -1190,6 +1266,7 @@ void HAL_ETH_TxFreeCallback(uint32_t * buff)
 {
 /* USER CODE BEGIN HAL ETH TxFreeCallback */
 
+  g_eth_diag.tx_free_count++;
   pbuf_free((struct pbuf *)buff);
 
 /* USER CODE END HAL ETH TxFreeCallback */
