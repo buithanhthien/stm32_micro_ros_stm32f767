@@ -101,6 +101,7 @@
 
 // Hệ số bộ điều khiển hướng (Heading controller gains)
 #define HEADING_KP         2.0f
+#define HEADING_KI         0.0f
 #define HEADING_KD         0.1f
 
 // Chu kỳ vòng lặp hướng
