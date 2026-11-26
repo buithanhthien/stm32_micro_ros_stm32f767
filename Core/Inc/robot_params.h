@@ -63,7 +63,7 @@
  * ==================================================================== */
 #define WHEEL_DIAMETER_M   0.1651f     // Đường kính bánh xe (10 cm)
 #define WHEEL_CIRC_M       (3.1415926f * WHEEL_DIAMETER_M)
-#define WHEEL_BASE_M       0.292f    // Khoảng cách 2 bánh xe (m)
+#define WHEEL_BASE_M       0.525f    // Khoảng cách 2 bánh xe (m)
 
 // Chu kỳ lấy mẫu cho các task (ms)
 #define ODOMETRY_PERIOD_MS     5
@@ -85,8 +85,8 @@
 #define MAXACC             2.5f
 
 // Hằng số bộ điều khiển PS2
-#define W_MAX              0.50f     // Tốc độ góc cực đại tay cầm (rad/s)
-#define W_STEP             W_MAX     // Vận tốc xoay D-pad
+#define W_MAX              2.00f     // Tốc độ góc cực đại cần analog (rad/s)
+#define W_STEP             W_MAX/4.0f     // Vận tốc xoay D-pad (rad/s)
 
 #define PS2_TIMEOUT_MS     500
 #define STICK_DEADBAND     12        // Vùng chết cần analog (0..255)
